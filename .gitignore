@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+dist-electron/
+release/
+*.tsbuildinfo
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local agent session artifacts (plans, probes, screenshots)
+.zcode/
+.agents/
+
+# Screenshots & local test artifacts
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+
+# Environment / secrets (keep the example file if one is added later)
+.env
+.env.*
+!.env.example
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,20 @@
+/* overlay 子窗口：透明背景，避免遮挡 ChatGPT 原生视图；只有面板/toast 区域才有内容 */
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: transparent !important;
+  background-image: none !important;
+  overflow: hidden;
+}
+
+/* 面板/anchor 容器铺满窗口；透明区域不拦截鼠标（主进程 setIgnoreMouseEvents 配合） */
+.overlay-root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+}
