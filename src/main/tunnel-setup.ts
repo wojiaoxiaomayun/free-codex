@@ -4,16 +4,20 @@
  * 复用 codex-mcp 的 dist 模块（bin 探测 / 命令执行 / yml 读写 / managed-tool 安装），
  * 只把终端交互（确认对话框）换成 IPC 往返，其余流程与 codex-mcp `codex-mcp tunnel` 一致：
  *   1. 找/装 cloudflared 二进制（找不到时自动下载 codex-mcp 内置的 pinned 版本）
- *   2. 登录 Cloudflare（生成 ~/.cloudflared/cert.pem）
+ *   2. 登录 Cloudflare（cert.pem 落在 codex-mcp 的 managed 目录 ~/.codex-mcp/cloudflare/.cloudflared/）
  *   3. 创建/复用 Tunnel（同名复用，缺凭据时确认后重建）
  *   4. 域名 DNS 路由（冲突时确认后 --overwrite-dns）
- *   5. 写 cloudflared.yml 到 free-codex 的 userData（不再依赖 ~/.codex-mcp）
+ *   5. 写 cloudflared.yml 到 free-codex 的 userData（Tunnel 凭据/证书仍由 codex-mcp 运行模块托管在 managed 目录）
+ *
+ * 注意：codex-mcp 的 runCloudflared 会把 HOME/USERPROFILE 指到 managed 目录（~/.codex-mcp/cloudflare），
+ * 所以管理命令必须像 codex-mcp 自身 CLI 一样显式带 --origincert，登录也必须把 cert.pem 写进 managed 目录，
+ * 否则 cloudflared 找不到 origin cert（"Cannot determine default origin certificate path"）。
  */
 
 import { app } from 'electron'
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { resolveCname } from 'node:dns/promises'
 
 // ------------------------------------------------------------
@@ -31,6 +35,8 @@ type CloudflaredExecModule = {
     args: string[],
     options?: { timeoutMs?: number; allowFailure?: boolean },
   ) => Promise<{ code: number | null; stdout: string; stderr: string }>
+  /** 与 runCloudflared 一致的子进程环境：HOME/USERPROFILE 指到 managed 目录、剔除 TUNNEL_* 变量 */
+  cloudflaredChildEnv: () => Record<string, string | undefined>
 }
 
 type CloudflaredYmlModule = {
@@ -45,23 +51,82 @@ type ManagedToolsModule = {
   ensureManagedTool: (tool: 'cloudflared') => Promise<{ tool: string; label: string; version: string; path: string; installed: boolean }>
 }
 
+/** Cloudflare 账号/登录凭据管理（managed 目录 ~/.codex-mcp/cloudflare/.cloudflared） */
+type CloudflareAccountModule = {
+  /** managed 目录里的 cert.pem 路径（--origincert 指向这里） */
+  getCloudflareOriginCertPath: () => string
+  /** managed cert.pem 是否存在且可解析（有效登录） */
+  hasManagedCloudflareLogin: () => boolean
+  /** 旧版系统级 ~/.cloudflared/cert.pem */
+  getLegacyCloudflareOriginCertPath: () => string
+  /** 把旧 ~/.cloudflared/<id>.json 凭据（连同 cert，同账号才迁移）搬到 managed 目录 */
+  migrateLegacyCloudflareState: (tunnelId?: string) => { certMigrated: boolean; credentialsMigrated: boolean }
+}
+
 type TunnelModules = {
   bin: CloudflaredBinModule
   exec: CloudflaredExecModule
   yml: CloudflaredYmlModule
   tools: ManagedToolsModule
+  cloudflareAccount: CloudflareAccountModule
 }
 
 const nativeImport = new Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<any>
 
 async function loadTunnelModules(): Promise<TunnelModules> {
-  const [bin, exec, yml, tools] = await Promise.all([
+  const [bin, exec, yml, tools, cloudflareAccount] = await Promise.all([
     nativeImport('@meesii/codex-mcp/dist/tunnel/bin.js'),
     nativeImport('@meesii/codex-mcp/dist/tunnel/exec.js'),
     nativeImport('@meesii/codex-mcp/dist/tunnel/yml.js'),
     nativeImport('@meesii/codex-mcp/dist/managed-tools/install.js'),
+    nativeImport('@meesii/codex-mcp/dist/tunnel/cloudflare-account.js'),
   ])
-  return { bin, exec, yml, tools }
+  return { bin, exec, yml, tools, cloudflareAccount }
+}
+
+/**
+ * 手动配置公网时，公网字段齐全但没有隧道配置文件 → 自动生成 userData/cloudflared.yml
+ * （内容与「一键创建」向导第 5 步一致；Tunnel 凭据缺失时抛错，由调用方决定保留原路径）。
+ */
+export async function generateTunnelConfigFile(input: {
+  domain: string
+  tunnelId: string
+  serviceHost: string
+  servicePort: number
+}): Promise<string> {
+  const modules = await loadTunnelModules()
+  const configPath = join(app.getPath('userData'), 'cloudflared.yml')
+  const credentialsFile = modules.yml.getCredentialsPath(input.tunnelId)
+  if (!existsSync(credentialsFile)) {
+    throw new Error(`没有找到 Tunnel 凭据：${credentialsFile}，请先用「一键创建」或手动创建 Tunnel`)
+  }
+  modules.yml.writeCloudflaredYml(
+    {
+      tunnelId: input.tunnelId,
+      credentialsFile,
+      hostname: input.domain,
+      serviceUrl: `http://${input.serviceHost || '127.0.0.1'}:${input.servicePort}`,
+    },
+    configPath,
+  )
+  return configPath
+}
+
+/** 探测可用的 cloudflared（managed 目录 → PATH → codex-mcp 包内）；用于设置页「自动检测」，找不到抛错 */
+export async function detectCloudflaredBin(configured?: string): Promise<string> {
+  const modules = await loadTunnelModules()
+  const found = await modules.bin.suggestCloudflaredBin(configured)
+  if (found) return found
+  throw new Error('未找到 cloudflared，可点「一键创建」自动下载，或用「浏览」手动选择')
+}
+
+/** 确保 cloudflared 可用：已有 → 直接返回；没有 → 自动下载 codex-mcp pinned 版本（设置页「下载」按钮） */
+export async function ensureCloudflaredBin(configured?: string): Promise<{ path: string; downloaded: boolean; version?: string }> {
+  const found = await detectCloudflaredBin(configured).catch(() => '')
+  if (found) return { path: found, downloaded: false }
+  const modules = await loadTunnelModules()
+  const installed = await modules.tools.ensureManagedTool('cloudflared')
+  return { path: installed.path, downloaded: true, version: installed.version }
 }
 
 // ------------------------------------------------------------
@@ -172,9 +237,12 @@ export class TunnelSetupCoordinator {
     const bin = await this.resolveBin(modules, input.configuredBin)
     this.checkAborted()
 
-    // 2) 登录 Cloudflare（浏览器 OAuth，~/.cloudflared/cert.pem）
-    await this.ensureLogin(bin)
+    // 2) 登录 Cloudflare（浏览器 OAuth；cert.pem 落到 managed 目录，与后续命令的 HOME 覆盖一致）
+    await this.ensureLogin(modules, bin)
     this.checkAborted()
+
+    // 2.5) 迁移旧 ~/.cloudflared 的 Tunnel 凭据到 managed 目录（同名 Tunnel 可直接复用，免删除重建）
+    await this.migrateLegacyCredentials(modules)
 
     // 3) 创建/复用 Tunnel
     const tunnelId = await this.ensureTunnelCreated(modules, bin, tunnelName)
@@ -216,6 +284,14 @@ export class TunnelSetupCoordinator {
     if (!approved) throw new Error('已取消')
   }
 
+  /**
+   * 管理命令公共前缀。runCloudflared 会把 HOME/USERPROFILE 指到 managed 目录（~/.codex-mcp/cloudflare），
+   * 所以必须像 codex-mcp CLI 一样显式传 --origincert，否则 cloudflared 找不到 cert.pem。
+   */
+  private managementArgs(modules: TunnelModules, ...rest: string[]): string[] {
+    return ['tunnel', '--origincert', modules.cloudflareAccount.getCloudflareOriginCertPath(), ...rest]
+  }
+
   private async resolveBin(modules: TunnelModules, configured?: string): Promise<string> {
     this.progress('resolve-bin', 'info', '正在检查 cloudflared…')
     const found = await modules.bin.suggestCloudflaredBin(configured)
@@ -230,17 +306,34 @@ export class TunnelSetupCoordinator {
     return installed.path
   }
 
-  /** 登录 Cloudflare：已有 cert.pem 跳过；否则跑 `cloudflared tunnel login`（自动打开浏览器） */
-  private async ensureLogin(bin: string): Promise<void> {
-    const certPath = join(app.getPath('home'), '.cloudflared', 'cert.pem')
-    if (existsSync(certPath)) {
+  /**
+   * 登录 Cloudflare：managed 目录有有效 cert.pem 跳过；旧 ~/.cloudflared/cert.pem 有则复用；
+   * 否则跑 `cloudflared tunnel login`（自动打开浏览器，写进 managed 目录）。
+   */
+  private async ensureLogin(modules: TunnelModules, bin: string): Promise<void> {
+    const certPath = modules.cloudflareAccount.getCloudflareOriginCertPath()
+    if (modules.cloudflareAccount.hasManagedCloudflareLogin()) {
       this.progress('login', 'success', '已登录 Cloudflare，无需重复登录')
       return
+    }
+    // 旧系统级登录凭据 → 复制到 managed 目录（后续管理命令用 --origincert 指向它，避免重复 OAuth）
+    const legacyCert = modules.cloudflareAccount.getLegacyCloudflareOriginCertPath()
+    if (existsSync(legacyCert) && !existsSync(certPath)) {
+      mkdirSync(dirname(certPath), { recursive: true })
+      copyFileSync(legacyCert, certPath)
+      if (process.platform !== 'win32') chmodSync(certPath, 0o600)
+      if (modules.cloudflareAccount.hasManagedCloudflareLogin()) {
+        this.progress('login', 'success', '已复用 ~/.cloudflared 的现有登录凭据')
+        return
+      }
+      // 旧证书无效 → 删掉，走重新登录
+      rmSync(certPath, { force: true })
     }
     this.progress('login', 'info', '正在打开浏览器，请登录 Cloudflare 并完成授权…')
 
     await new Promise<void>((resolve, reject) => {
-      const child = spawn(bin, ['tunnel', 'login'], { windowsHide: true, env: process.env })
+      // 与 runCloudflared 一致的环境（HOME/USERPROFILE 指向 managed 目录），登录凭据落到 --origincert 同路径
+      const child = spawn(bin, ['tunnel', 'login'], { windowsHide: true, env: modules.exec.cloudflaredChildEnv() })
       this.loginChild = child
       const forward = (chunk: Buffer) => {
         const line = chunk.toString('utf8').trim()
@@ -259,6 +352,26 @@ export class TunnelSetupCoordinator {
       })
     })
     this.progress('login', 'success', 'Cloudflare 登录完成')
+  }
+
+  /**
+   * 把旧系统级 ~/.cloudflared/<id>.json 凭据迁移到 managed 目录（migrateLegacyCloudflareState 只搬同账号的），
+   * 这样 Cloudflare 上已有同名 Tunnel 时能直接复用，不再要求"删除重建"。
+   */
+  private async migrateLegacyCredentials(modules: TunnelModules): Promise<void> {
+    const legacyDir = dirname(modules.cloudflareAccount.getLegacyCloudflareOriginCertPath())
+    let migrated = 0
+    try {
+      for (const entry of readdirSync(legacyDir)) {
+        const id = entry.match(TUNNEL_ID_RE)?.[0]
+        if (!id || !entry.endsWith('.json')) continue
+        const result = modules.cloudflareAccount.migrateLegacyCloudflareState(id)
+        if (result.certMigrated || result.credentialsMigrated) migrated++
+      }
+    } catch {
+      // 旧目录不存在/不可读 → 忽略
+    }
+    if (migrated > 0) this.progress('tunnel', 'info', `已迁移 ${migrated} 个旧 Tunnel 凭据`)
   }
 
   /** 按名称找/建 Tunnel；同名缺凭据时需确认后删除重建（凭据在 ~/.cloudflared/<id>.json） */
@@ -282,7 +395,7 @@ export class TunnelSetupCoordinator {
     }
 
     this.progress('tunnel', 'info', `正在创建 Tunnel：${tunnelName}…`)
-    const result = await modules.exec.runCloudflared(bin, ['tunnel', 'create', tunnelName], { allowFailure: true })
+    const result = await modules.exec.runCloudflared(bin, this.managementArgs(modules, 'create', tunnelName), { allowFailure: true })
     const combined = `${result.stdout}\n${result.stderr}`
     const created = combined.match(TUNNEL_ID_RE)?.[0]
     if (result.code === 0 && created) {
@@ -307,7 +420,7 @@ export class TunnelSetupCoordinator {
     bin: string,
     tunnelName: string,
   ): Promise<string | undefined> {
-    const jsonAttempt = await modules.exec.runCloudflared(bin, ['tunnel', 'list', '--output', 'json'], {
+    const jsonAttempt = await modules.exec.runCloudflared(bin, this.managementArgs(modules, 'list', '--output', 'json'), {
       allowFailure: true,
       timeoutMs: 60_000,
     })
@@ -320,7 +433,7 @@ export class TunnelSetupCoordinator {
         // 退化成文本表格解析
       }
     }
-    const list = await modules.exec.runCloudflared(bin, ['tunnel', 'list'], {
+    const list = await modules.exec.runCloudflared(bin, this.managementArgs(modules, 'list'), {
       allowFailure: true,
       timeoutMs: 60_000,
     })
@@ -335,12 +448,12 @@ export class TunnelSetupCoordinator {
   }
 
   private async deleteTunnel(modules: TunnelModules, bin: string, tunnelName: string, tunnelId: string): Promise<void> {
-    const byName = await modules.exec.runCloudflared(bin, ['tunnel', 'delete', '-f', tunnelName], {
+    const byName = await modules.exec.runCloudflared(bin, this.managementArgs(modules, 'delete', '-f', tunnelName), {
       allowFailure: true,
       timeoutMs: 120_000,
     })
     if (byName.code === 0) return
-    const byId = await modules.exec.runCloudflared(bin, ['tunnel', 'delete', '-f', tunnelId], {
+    const byId = await modules.exec.runCloudflared(bin, this.managementArgs(modules, 'delete', '-f', tunnelId), {
       allowFailure: true,
       timeoutMs: 120_000,
     })
@@ -358,7 +471,7 @@ export class TunnelSetupCoordinator {
     tunnelId: string,
   ): Promise<void> {
     this.progress('dns', 'info', `正在把域名 ${domain} 连接到 Tunnel…`)
-    const create = await modules.exec.runCloudflared(bin, ['tunnel', 'route', 'dns', tunnelName, domain], {
+    const create = await modules.exec.runCloudflared(bin, this.managementArgs(modules, 'route', 'dns', tunnelName, domain), {
       allowFailure: true,
       timeoutMs: 120_000,
     })
@@ -376,7 +489,7 @@ export class TunnelSetupCoordinator {
     }
     this.progress('dns', 'warning', `域名 ${domain} 已经有其它 DNS 记录，需要确认是否替换`)
     await this.confirm(`要把 ${domain} 现有的 DNS 记录改成当前 Tunnel 吗？这会改变这个域名现在指向的位置。`)
-    const overwrite = await modules.exec.runCloudflared(bin, ['tunnel', 'route', 'dns', '--overwrite-dns', tunnelName, domain], {
+    const overwrite = await modules.exec.runCloudflared(bin, this.managementArgs(modules, 'route', 'dns', '--overwrite-dns', tunnelName, domain), {
       allowFailure: true,
       timeoutMs: 120_000,
     })

@@ -106,14 +106,37 @@
                   aria-label="启用公网模式"
                   @update:checked="setPublicEnabled"
                 />
-                <Button size="sm" variant="outline" class="ml-1 gap-1.5 hover:border-primary/50 hover:text-primary" @click="openTunnelWizard">
-                  <RocketIcon class="size-3.5" />
-                  一键创建
-                </Button>
               </div>
             </div>
           </CardHeader>
           <CardContent class="flex flex-col gap-3">
+            <Field>
+              <FieldLabel for="gw-cfbin">cloudflared 路径</FieldLabel>
+              <FieldContent>
+                <div class="flex gap-2">
+                  <Input
+                    id="gw-cfbin"
+                    v-model="config.gateway.cloudflaredBin"
+                    :disabled="!config?.gateway.publicEnabled"
+                    placeholder="cloudflared"
+                    class="flex-1"
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    :disabled="!config?.gateway.publicEnabled || cfBusy"
+                    title="已有则直接使用；没有则自动下载 codex-mcp 内置版本"
+                    @click="downloadCloudflared"
+                  >{{ cfBusy ? '下载中…' : '下载' }}</Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    :disabled="!config?.gateway.publicEnabled"
+                    @click="pickCloudflared"
+                  >浏览…</Button>
+                </div>
+              </FieldContent>
+            </Field>
             <Field>
               <FieldLabel for="gw-domain">公网域名</FieldLabel>
               <FieldContent>
@@ -122,17 +145,6 @@
                   v-model="config.gateway.domain"
                   :disabled="!config?.gateway.publicEnabled"
                   placeholder="mcp.example.com"
-                />
-              </FieldContent>
-            </Field>
-            <Field>
-              <FieldLabel for="gw-cfbin">cloudflared 路径</FieldLabel>
-              <FieldContent>
-                <Input
-                  id="gw-cfbin"
-                  v-model="config.gateway.cloudflaredBin"
-                  :disabled="!config?.gateway.publicEnabled"
-                  placeholder="cloudflared"
                 />
               </FieldContent>
             </Field>
@@ -160,17 +172,21 @@
                 </FieldContent>
               </Field>
             </div>
-            <Field>
-              <FieldLabel for="gw-tunnelcfg">tunnel 配置文件</FieldLabel>
-              <FieldContent>
-                <Input
-                  id="gw-tunnelcfg"
-                  v-model="config.gateway.tunnelConfigPath"
-                  :disabled="!config?.gateway.publicEnabled"
-                  placeholder="（可选）~/.codex-mcp/cloudflared.yml"
-                />
-              </FieldContent>
-            </Field>
+            <div class="mt-1 flex flex-wrap items-center justify-between gap-2 border-t border-border/60 pt-3">
+              <span class="text-xs text-muted-foreground">
+                填写后点「保存公网配置」生效；隧道配置文件由应用自动生成/复用，无需手动填写。
+              </span>
+              <div class="flex shrink-0 items-center gap-2">
+                <Button v-if="!hasPublicConfig" size="sm" variant="outline" class="gap-1.5" @click="openTunnelWizard">
+                  <RocketIcon class="size-3.5" />
+                  一键创建
+                </Button>
+                <Button size="sm" @click="saveConfig">
+                  <SaveIcon class="size-3.5" />
+                  保存公网配置
+                </Button>
+              </div>
+            </div>
           </CardContent>
         </Card>
 
@@ -457,8 +473,8 @@
               <Button
                 variant="outline"
                 size="sm"
-                :disabled="devModeBusy || !loginState?.loggedIn"
-                :title="loginState?.loggedIn ? '' : '请先登录 ChatGPT'"
+                :disabled="devModeBusy"
+                :title="loginState?.loggedIn ? '' : '未登录时会先引导登录'"
                 @click="ensureDevMode"
               >
                 {{ devModeBusy ? '处理中…' : '确保开发者模式开启' }}
@@ -484,14 +500,14 @@
                 <Button
                   variant="outline"
                   size="sm"
-                  :disabled="pluginBusy || !loginState?.loggedIn"
-                  :title="loginState?.loggedIn ? '' : '请先登录 ChatGPT'"
+                  :disabled="pluginBusy || !FREECODEX_MCP_URL"
+                  :title="!FREECODEX_MCP_URL ? '请先配置公网域名' : loginState?.loggedIn ? '' : '未登录时会先引导登录'"
                   @click="refreshPlugin"
                 >检测</Button>
                 <Button
                   size="sm"
-                  :disabled="pluginBusy || !loginState?.loggedIn"
-                  :title="loginState?.loggedIn ? '' : '请先登录 ChatGPT'"
+                  :disabled="pluginBusy || !FREECODEX_MCP_URL"
+                  :title="!FREECODEX_MCP_URL ? '请先配置公网域名' : loginState?.loggedIn ? '' : '未登录时会先引导登录'"
                   @click="installPlugin"
                 >
                   {{ pluginStatus?.found ? '重新安装' : '安装' }}
@@ -500,6 +516,40 @@
             </div>
           </CardContent>
         </Card>
+
+        <!-- 授权连接密码（OAuth 安装需要；应用只存哈希，输入一次或自动生成） -->
+        <Dialog v-model:open="installPasswordOpen">
+          <DialogScrollContent class="flex max-h-[85vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-lg">
+            <DialogHeader class="shrink-0 border-b border-border px-6 py-4">
+              <DialogTitle class="text-base">授权连接需要连接密码</DialogTitle>
+              <DialogDescription>
+                安装 OAuth 插件需要先通过本机网关的「连接密码」验证。密码只存哈希，请手动输入一次；忘了就自动生成新的。
+              </DialogDescription>
+            </DialogHeader>
+            <div class="flex flex-col gap-3 px-6 py-4">
+              <Input
+                v-model="installPassword"
+                type="password"
+                placeholder="连接密码（≥ 12 字符）"
+                :disabled="installPasswordBusy"
+                @keydown.enter="confirmInstallPassword(false)"
+              />
+              <p v-if="installPasswordHint" class="text-xs text-destructive">{{ installPasswordHint }}</p>
+              <p class="text-xs text-muted-foreground">
+                提示：生成新密码会替换现有连接密码（旧密码失效）；应用会自动用它完成授权，无需你记住。
+              </p>
+            </div>
+            <DialogFooter class="shrink-0 gap-2 border-t border-border px-6 py-4">
+              <Button variant="ghost" :disabled="installPasswordBusy" @click="installPasswordOpen = false">取消</Button>
+              <Button variant="outline" :disabled="installPasswordBusy" @click="confirmInstallPassword(true)">
+                {{ installPasswordBusy ? '处理中…' : '自动生成并使用' }}
+              </Button>
+              <Button :disabled="installPasswordBusy || !installPassword.trim()" @click="confirmInstallPassword(false)">
+                {{ installPasswordBusy ? '处理中…' : '确认授权' }}
+              </Button>
+            </DialogFooter>
+          </DialogScrollContent>
+        </Dialog>
 
         <!-- 内置工具 -->
         <Card class="mb-4">
@@ -567,7 +617,7 @@
           <div class="flex flex-col gap-1">
             <h1 class="text-xl font-semibold">MCP 服务器</h1>
             <p class="text-sm text-muted-foreground">
-              下游服务器：连接成功后工具自动注册并注入到对话；配置存 Free Codex，不再使用 ~/.codex-mcp/mcp.json。
+              下游服务器：连接成功后工具自动注册并注入到对话；以 Free Codex 配置为准，并自动与 ~/.codex-mcp/mcp.json 双向同步（首次运行导入，保存时写回，供独立 codex-mcp 复用）。
             </p>
           </div>
           <Button size="sm" @click="openMcpCreate">
@@ -1010,17 +1060,24 @@ async function goBack(): Promise<void> {
 // ---------- 配置（free-codex 自持）----------
 const config = ref<FreeCodexConfig | null>(null)
 
+/** 公网配置是否已就绪（域名 + Tunnel ID 都填了 → 不再需要「一键创建」） */
+const hasPublicConfig = computed(() => !!config.value?.gateway?.domain?.trim() && !!config.value?.gateway?.tunnelId?.trim())
+
 /** 全量保存连接/公网配置（Gateway 运行中 → 主进程自动重启生效） */
 async function saveConfig(): Promise<void> {
   if (!config.value) return
+  const domain = config.value.gateway?.domain?.trim()
+  const publicHint = domain ? `公网入口 https://${domain}/mcp` : '当前为本地模式'
   try {
     const result = await window.freeCodex.saveConfig(config.value)
+    // 主进程可能自动生成了 cloudflared.yml 等 → 重载配置让字段显示真实值
+    config.value = await window.freeCodex.getConfig()
     if (result.restartError) {
       toast.warning('配置已保存，但 Gateway 重启失败', { description: result.restartError })
     } else if (result.restarted) {
-      toast.success('配置已保存，Gateway 已自动重启', { description: result.url })
+      toast.success('配置已保存，Gateway 已自动重启', { description: result.url || publicHint })
     } else {
-      toast.success('配置已保存', { description: 'Gateway 未运行，下次启动时生效' })
+      toast.success('配置已保存', { description: `${publicHint}；Gateway 未运行，下次启动时生效` })
     }
   } catch (e) {
     toast.error('保存失败', { description: e instanceof Error ? e.message : String(e) })
@@ -1038,6 +1095,41 @@ async function setAutoStart(value: boolean): Promise<void> {
 function setPublicEnabled(value: boolean): void {
   if (!config.value) return
   config.value.gateway.publicEnabled = value
+}
+
+/** 确保 cloudflared 可用：已有 → 直接填入；没有 → 自动下载并填入（不立即保存，随「保存公网配置」提交） */
+const cfBusy = ref(false)
+async function downloadCloudflared(): Promise<void> {
+  if (!config.value || cfBusy.value) return
+  cfBusy.value = true
+  try {
+    const r = await window.freeCodex.ensureCloudflaredBin()
+    if (r.ok && r.path) {
+      config.value.gateway.cloudflaredBin = r.path
+      if (r.downloaded) toast.success(`cloudflared 已下载（v${r.version ?? ''}）`, { description: r.path })
+      else toast.success('cloudflared 已就绪', { description: r.path })
+    } else {
+      toast.error('获取 cloudflared 失败', { description: r.error ?? '请检查网络后重试' })
+    }
+  } catch (err) {
+    toast.error('获取 cloudflared 失败', { description: err instanceof Error ? err.message : String(err) })
+  } finally {
+    cfBusy.value = false
+  }
+}
+
+/** 系统文件选择器选 cloudflared 路径（不立即保存，随「保存公网配置」提交） */
+async function pickCloudflared(): Promise<void> {
+  if (!config.value) return
+  try {
+    const r = await window.freeCodex.pickCloudflaredBin()
+    if (r.ok && r.path) {
+      config.value.gateway.cloudflaredBin = r.path
+      toast.success('已选择 cloudflared', { description: r.path })
+    }
+  } catch (err) {
+    toast.error('选择失败', { description: err instanceof Error ? err.message : String(err) })
+  }
 }
 
 /** UI 偏好（运行中即时生效） */
@@ -1614,8 +1706,11 @@ async function saveSkill(): Promise<void> {
 }
 
 // ---------- ChatGPT 插件（连接器）：开发者模式 + freecodex 插件安装 ----------
-/** 目标插件 = 本应用的 MCP 网关公网地址（与 config.gateway.domain 一致） */
-const FREECODEX_MCP_URL = 'https://freecodex.alim.indevs.in/mcp'
+/** 目标插件 = 本应用的 MCP 网关公网地址（取配置的 gateway.domain，与主进程 refreshDetectedPluginName 一致，不再写死） */
+const FREECODEX_MCP_URL = computed(() => {
+  const domain = config.value?.gateway?.domain?.trim()
+  return domain ? `https://${domain}/mcp` : ''
+})
 const devMode = ref<{ developerMode: boolean; lockdownMode: boolean } | null>(null)
 const devModeBusy = ref(false)
 const pluginStatus = ref<{ found: boolean; name?: string; displayName?: string; appId?: string } | null>(null)
@@ -1633,10 +1728,19 @@ async function refreshLogin(): Promise<void> {
   }
 }
 
-/** 未登录 → 导航到登录页并轮询等待登录完成，登录成功后自动刷新开发者模式与插件状态 */
+/** 未登录 → 回到 AI 应用视图并打开登录页，轮询等待登录完成，成功后自动刷新开发者模式与插件状态 */
 async function goLogin(): Promise<void> {
   loginBusy.value = true
-  await window.freeCodex.chatgpt.openLogin().catch(() => undefined)
+  // 设置页里 ChatGPT 视图是隐藏的（原生 WebContentsView，见 App.vue 路由 watcher），
+  // 必须恢复视图并切回首页，否则登录页在后台加载，用户看不到任何反应。
+  await window.freeCodex.showActiveView().catch(() => undefined)
+  await router.push('/').catch(() => undefined)
+  const r = (await window.freeCodex.chatgpt.openLogin().catch(() => null)) as { ok?: boolean; error?: string } | null
+  if (!r || r.ok !== true) {
+    loginBusy.value = false
+    toast.error('无法打开登录页', { description: r?.error ?? 'ChatGPT 视图不可用' })
+    return
+  }
   if (loginTimer) clearInterval(loginTimer)
   loginTimer = setInterval(async () => {
     try {
@@ -1664,7 +1768,16 @@ async function refreshDevMode(): Promise<void> {
   }
 }
 
+/** 未登录 → 引导登录（应用内 ChatGPT 视图）并返回 false；已登录返回 true */
+async function ensureLoggedIn(): Promise<boolean> {
+  if (loginState.value?.loggedIn) return true
+  toast.info('请先在 ChatGPT 视图登录', { description: '正在为你打开登录页…' })
+  await goLogin()
+  return false
+}
+
 async function ensureDevMode(): Promise<void> {
+  if (!(await ensureLoggedIn())) return
   devModeBusy.value = true
   try {
     const r = await window.freeCodex.chatgpt.ensureDevMode()
@@ -1679,12 +1792,10 @@ async function ensureDevMode(): Promise<void> {
 }
 
 async function refreshPlugin(): Promise<void> {
+  if (!(await ensureLoggedIn())) return
   pluginBusy.value = true
   try {
-    const p = await window.freeCodex.chatgpt.findPlugin({ url: FREECODEX_MCP_URL })
-    pluginStatus.value = p
-      ? { found: true, name: p.name, displayName: p.displayName, appId: p.canonicalAppId }
-      : { found: false }
+    await silentRefreshPlugin()
   } catch (err) {
     pluginStatus.value = null
     toast.warning('无法检测插件状态', { description: err instanceof Error ? err.message : String(err) })
@@ -1693,19 +1804,26 @@ async function refreshPlugin(): Promise<void> {
   }
 }
 
-/** 安装插件：先探测 OAuth 配置；OAuth 场景提示到 ChatGPT 页面完成授权 */
+/** 静默刷新插件状态（定时轮询用，不弹登录引导、不打扰） */
+async function silentRefreshPlugin(): Promise<void> {
+  if (!loginState.value?.loggedIn || !FREECODEX_MCP_URL.value) return
+  try {
+    const p = await window.freeCodex.chatgpt.findPlugin({ url: FREECODEX_MCP_URL.value })
+    pluginStatus.value = p
+      ? { found: true, name: p.name, displayName: p.displayName, appId: p.canonicalAppId }
+      : { found: false }
+  } catch {
+    /* 静默失败，等下一轮 */
+  }
+}
+
+/** 一键安装插件：无 OAuth 自动直连；OAuth 自动打开授权页填密码提交，需要密码时弹窗让用户输入/自动生成 */
 async function installPlugin(): Promise<void> {
+  if (!(await ensureLoggedIn())) return
   pluginBusy.value = true
   try {
-    const probe = await window.freeCodex.chatgpt.probeMcp(FREECODEX_MCP_URL)
-    if (probe.oauthRequired) {
-      toast.warning('该插件需要 OAuth 授权', {
-        description: '请在 ChatGPT 页面完成连接（插件 → 个人 → 添加该 MCP 地址并授权）',
-      })
-    } else {
-      toast.info('已发送安装请求', { description: '请到 ChatGPT 插件页确认连接' })
-    }
-    await refreshPlugin()
+    const r = await window.freeCodex.chatgpt.installMcp({ url: FREECODEX_MCP_URL.value, name: 'free-codex' })
+    await handleInstallResult(r)
   } catch (err) {
     toast.error('安装失败', { description: err instanceof Error ? err.message : String(err) })
   } finally {
@@ -1713,9 +1831,81 @@ async function installPlugin(): Promise<void> {
   }
 }
 
+type InstallResult = {
+  ok?: boolean
+  installed?: boolean
+  oauthUrl?: string
+  needPassword?: boolean
+  wrongPassword?: boolean
+  message?: string
+}
+
+/** 处理安装结果：需要密码 → 弹窗；授权页没走通 → 切回首页让用户看到已打开的页面；成功/失败 → toast */
+async function handleInstallResult(r: InstallResult | null): Promise<void> {
+  if (!r) {
+    toast.error('安装失败', { description: '无响应' })
+    return
+  }
+  if (r.ok && r.installed) {
+    toast.success('freecodex 插件已安装')
+  } else if (r.ok) {
+    toast.success('连接已建立，正在同步插件状态…')
+  } else if (r.needPassword) {
+    installPasswordHint.value = ''
+    installPasswordOpen.value = true
+    return
+  } else if (r.wrongPassword) {
+    installPasswordHint.value = '连接密码不正确，请重试'
+    installPasswordOpen.value = true
+    return
+  } else if (r.oauthUrl) {
+    // 授权页没走通 → 切回首页，让用户看到已打开的页面手动完成
+    await window.freeCodex.showActiveView().catch(() => undefined)
+    await router.push('/').catch(() => undefined)
+    toast.warning(r.message ?? '授权页没有走通，请在打开的页面手动完成')
+  } else {
+    toast.error('安装失败', { description: r.message ?? '未知错误' })
+  }
+  await refreshPlugin()
+}
+
+// ---------- 授权连接密码弹窗（OAuth 需要；密码只存哈希，需用户输入一次，或自动生成新密码） ----------
+const installPasswordOpen = ref(false)
+const installPassword = ref('')
+const installPasswordHint = ref('')
+const installPasswordBusy = ref(false)
+
+/** 弹窗确认：输入密码或自动生成新密码，然后用它继续自动授权 */
+async function confirmInstallPassword(generateNew: boolean): Promise<void> {
+  if (installPasswordBusy.value) return
+  installPasswordBusy.value = true
+  try {
+    let password = installPassword.value.trim()
+    if (generateNew) {
+      password = await window.freeCodex.auth.generatePassword()
+      await window.freeCodex.auth.setPassword(password)
+      toast.success('已生成新的连接密码（用于本次自动授权）')
+    }
+    if (!password) {
+      installPasswordHint.value = '请填写连接密码，或点击「自动生成并使用」'
+      return
+    }
+    installPasswordOpen.value = false
+    const r = await window.freeCodex.chatgpt.installMcp({ url: FREECODEX_MCP_URL.value, name: 'free-codex', password })
+    await handleInstallResult(r)
+  } catch (err) {
+    toast.error('安装失败', { description: err instanceof Error ? err.message : String(err) })
+  } finally {
+    installPasswordBusy.value = false
+  }
+}
+
 function shortAppId(id?: string): string {
   return id && id.length > 20 ? `${id.slice(0, 20)}…` : (id ?? '')
 }
+
+/** 插件状态定时轮询（20s 静默刷新，保持设置页显示与 ChatGPT 实际状态同步） */
+let pluginTimer: ReturnType<typeof setInterval> | undefined
 
 onMounted(async () => {
   config.value = await window.freeCodex.getConfig()
@@ -1730,10 +1920,17 @@ onMounted(async () => {
     void refreshDevMode()
     void refreshPlugin()
   }
+  if (!pluginTimer) {
+    pluginTimer = setInterval(() => void silentRefreshPlugin(), 20_000)
+  }
 })
 
 onUnmounted(() => {
   if (loginTimer) clearInterval(loginTimer)
+  if (pluginTimer) {
+    clearInterval(pluginTimer)
+    pluginTimer = undefined
+  }
 })
 </script>
 

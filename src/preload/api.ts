@@ -40,6 +40,10 @@ export function exposeFreeCodexApi(): void {
     answerTunnelAsk: (id: number, approved: boolean): Promise<unknown> =>
       ipcRenderer.invoke('tunnel:answer', id, approved),
     cancelTunnelSetup: (): Promise<void> => ipcRenderer.invoke('tunnel:cancel'),
+    /** cloudflared 路径：确保可用（已有直接用，没有自动下载 codex-mcp 内置版本） */
+    ensureCloudflaredBin: (): Promise<unknown> => ipcRenderer.invoke('cloudflare:ensureBin'),
+    /** cloudflared 路径：系统文件选择器 */
+    pickCloudflaredBin: (): Promise<unknown> => ipcRenderer.invoke('cloudflare:pickBin'),
     onTunnelProgress: (callback: (event: unknown) => void): (() => void) => {
       const listener = (_event: Electron.IpcRendererEvent, value: unknown) => callback(value)
       ipcRenderer.on('tunnel:progress', listener)
@@ -71,6 +75,12 @@ export function exposeFreeCodexApi(): void {
       const listener = (_event: Electron.IpcRendererEvent, value: unknown) => callback(value)
       ipcRenderer.on('tunnel:status', listener)
       return () => ipcRenderer.removeListener('tunnel:status', listener)
+    },
+    /** 订阅右上角插件状态推送（freecodex 连接器已安装与否），返回取消订阅函数 */
+    onPluginStatus: (callback: (status: unknown) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, value: unknown) => callback(value)
+      ipcRenderer.on('plugin:status', listener)
+      return () => ipcRenderer.removeListener('plugin:status', listener)
     },
     onMcpEvent: (callback: (event: unknown) => void) => {
       const listener = (_event: Electron.IpcRendererEvent, value: unknown) => callback(value)
@@ -141,6 +151,9 @@ export function exposeFreeCodexApi(): void {
       devModeStatus: (): Promise<unknown> => ipcRenderer.invoke('chatgpt:devModeStatus'),
       /** 确保开发者模式开启（未开启则自动开启） */
       ensureDevMode: (): Promise<unknown> => ipcRenderer.invoke('chatgpt:ensureDevMode'),
+      /** 一键安装 MCP 连接器（无 OAuth 直连；OAuth 自动打开授权页，需要密码时返回 needPassword） */
+      installMcp: (input: { url: string; name?: string; password?: string }): Promise<unknown> =>
+        ipcRenderer.invoke('chatgpt:installMcp', input),
       /** 已安装插件列表 */
       plugins: (): Promise<unknown> => ipcRenderer.invoke('chatgpt:plugins'),
       /** 按 URL/名称/AppId 查找已安装插件 */

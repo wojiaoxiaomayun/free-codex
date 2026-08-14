@@ -2,6 +2,7 @@ import { app } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
 import type { GatewayConfig } from './mcp-gateway'
+import { syncCodexMcpConfig } from './codex-config-sync'
 
 /** 下游 MCP 服务器配置项（stdio 或 http 二选一） */
 export type McpServerConfig = {
@@ -131,7 +132,8 @@ const defaults = (): Config => ({
     disabledTools: [],
   },
   todos: {
-    enabled: false,
+    // 默认开启：todos 是应用内置的任务清单工作流（每轮快照 + 未更新提醒）
+    enabled: true,
   },
   mcpServers: {},
 })
@@ -196,5 +198,55 @@ export function saveConfig(config: Config) {
   const tmp = `${file()}.${process.pid}.tmp`
   fs.writeFileSync(tmp, body, 'utf8')
   fs.renameSync(tmp, file())
+  // 写回 codex-mcp 配置（复用支持）：失败只记日志，不阻断保存
+  try {
+    syncCodexMcpConfig(config)
+  } catch (err) {
+    console.warn('[config] 写回 ~/.codex-mcp 失败:', err instanceof Error ? err.message : String(err))
+  }
+}
+
+/** 读取 ~/.codex-mcp/config.json（不存在/损坏 → 空对象） */
+function readCodexUserConfig(): Record<string, unknown> {
+  const p = path.join(app.getPath('home'), '.codex-mcp', 'config.json')
+  try {
+    if (!fs.existsSync(p)) return {}
+    const raw = JSON.parse(fs.readFileSync(p, 'utf8')) as unknown
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {}
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * 反向导入（一次性）：本地已有一套 codex-mcp 的公网配置（domain + tunnelId），
+ * 而 free-codex 还没配公网 → 采纳 codex-mcp 的域名 / Tunnel / cloudflared / 隧道名，
+ * 避免新手在两边重复配置。返回是否发生了导入（调用方负责持久化）。
+ */
+export function importCodexPublicConfig(config: Config): boolean {
+  if (config.gateway.publicEnabled || config.gateway.domain || config.gateway.tunnelId) return false
+  const codex = readCodexUserConfig()
+  const domain = typeof codex.domain === 'string' && codex.domain.trim() ? codex.domain.trim() : ''
+  const tunnelId = typeof codex.tunnelId === 'string' && codex.tunnelId.trim() ? codex.tunnelId.trim() : ''
+  if (!domain || !tunnelId) return false
+  const cloudflaredBin = typeof codex.cloudflaredBin === 'string' && codex.cloudflaredBin.trim() ? codex.cloudflaredBin.trim() : ''
+  const tunnelName = typeof codex.tunnelName === 'string' && codex.tunnelName.trim() ? codex.tunnelName.trim() : ''
+  config.gateway = {
+    ...config.gateway,
+    publicEnabled: codex.useCloudflared !== false,
+    domain,
+    tunnelId,
+    ...(cloudflaredBin ? { cloudflaredBin } : {}),
+    ...(tunnelName ? { tunnelName } : {}),
+  }
+  config.cloudflare = {
+    enabled: true,
+    executable: cloudflaredBin || config.cloudflare.executable,
+    hostname: domain,
+    tunnelId,
+    configPath: config.cloudflare.configPath,
+  }
+  console.log('[config] 已从 ~/.codex-mcp/config.json 导入公网配置:', domain)
+  return true
 }
 

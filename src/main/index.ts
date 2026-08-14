@@ -1,12 +1,14 @@
 import { app, BrowserWindow, BrowserWindowConstructorOptions, dialog, ipcMain, session, WebContentsView, type WebContents } from 'electron'
 import { is } from '@electron-toolkit/utils'
+import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
-import { loadConfig, saveConfig, type Config, type ProxyConfig } from './config'
+import { loadConfig, saveConfig, importCodexPublicConfig, type Config, type ProxyConfig } from './config'
+import { syncCodexMcpConfig } from './codex-config-sync'
 import { NodeMcpGateway, defaultGoalStorageDir, type ToolCallRecord } from './mcp-gateway'
 import { TodosServer, TODOS_REMINDER, type TodosStatus, type TodosUiState } from './todos-server'
 import { TunnelManager } from './tunnel-manager'
 import { listMcpServers, setMcpServer, deleteMcpServer } from './mcp-config'
-import { TunnelSetupCoordinator, type TunnelAsk, type TunnelSetupInput } from './tunnel-setup'
+import { TunnelSetupCoordinator, generateTunnelConfigFile, ensureCloudflaredBin, type TunnelAsk, type TunnelSetupInput } from './tunnel-setup'
 import { hasAdminPassword, setAdminPassword, generateAdminPassword } from './auth'
 import { SkillManager, getSkillDirectories } from './skills'
 import { createProjectManager, type ProjectManager } from './projects'
@@ -19,7 +21,10 @@ import {
   isDeveloperModeEnabled,
   listInstalledPlugins,
   findPlugin,
+  findConnectorByUrl,
   probeMcpOAuthConfig,
+  installMcpConnector,
+  fetchConnectorCatalog,
   listConversations,
   deleteConversation,
   deleteAllConversations,
@@ -49,6 +54,8 @@ let gateway: NodeMcpGateway
 let todosServer: TodosServer
 /** cloudflared 隧道管理器（app 层能力；公网不可达时拉起，网关重启不触碰） */
 let tunnelManager: TunnelManager | undefined
+/** 一键 Tunnel 向导协调器（退出清理时终止登录中的 cloudflared 子进程） */
+let tunnelCoordinator: TunnelSetupCoordinator | null = null
 let skills: SkillManager
 let projects: ProjectManager
 let panelCollapsed = false
@@ -70,6 +77,13 @@ type TunnelStatus = {
   publicUrl: string
   checkedAt: number
   detail: string
+}
+/** 插件（freecodex 连接器）状态（titlebar 指示器）：checking=检测中 installed=已安装 not-installed=未安装 no-login=未登录 no-domain=未配置公网域名 */
+type PluginStatus = {
+  state: 'checking' | 'installed' | 'not-installed' | 'no-login' | 'no-domain'
+  displayName?: string
+  appId?: string
+  checkedAt: number
 }
 /** 公网状态轮询定时器（30s 一次；网关/隧道事件也会触发即时推送） */
 let tunnelStatusTimer: NodeJS.Timeout | undefined
@@ -115,18 +129,38 @@ async function syncPluginMentionGlobals(): Promise<void> {
     .catch(() => undefined)
 }
 
-/** 主动检测一次 freecodex 插件显示名（启动后页面/目录缓存就绪时调用），供注入使用 */
-async function refreshDetectedPluginName(): Promise<void> {
-  const domain = config?.gateway?.domain
-  if (!domain) return
-  const url = `https://${domain}/mcp`
+/** 读 ChatGPT 连接器目录（URL → 插件 id/显示名 映射）：优先页面 localStorage 缓存，没有则直接调后端目录 API */
+async function readConnectorCatalog(): Promise<string | null> {
   const wc = chatView?.webContents
-  const catalogJson =
+  const cached =
     wc && !wc.isDestroyed()
       ? await wc
           .executeJavaScript(`(() => { try { const k = Object.keys(localStorage).find(k => /system-connectors/.test(k)); return k ? localStorage.getItem(k) : null; } catch (e) { return null; } })()`)
           .catch(() => null)
       : null
+  if (cached && cached !== 'null' && cached.trim().startsWith('{')) return cached
+  // ChatGPT 现在不一定把目录写进 localStorage → 回退调后端连接器目录 API（不再依赖页面缓存）
+  return await fetchConnectorCatalog()
+}
+
+/** 轮询直到 MCP 插件出现在已安装列表（OAuth 授权回调后 ChatGPT 异步建链） */
+async function pollPluginInstalled(url: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const catalogJson = await readConnectorCatalog()
+    const plugin = await findPlugin({ url }, catalogJson)
+    if (plugin) return true
+    await new Promise((r) => setTimeout(r, 2000))
+  }
+  return false
+}
+
+/** 主动检测一次 freecodex 插件显示名（启动后页面/目录缓存就绪时调用），供注入使用 */
+async function refreshDetectedPluginName(): Promise<void> {
+  const domain = config?.gateway?.domain
+  if (!domain) return
+  const url = `https://${domain}/mcp`
+  const catalogJson = await readConnectorCatalog()
   const result = await findPlugin({ url }, catalogJson)
   if (result?.displayName && result.displayName !== detectedPluginName) {
     detectedPluginName = result.displayName
@@ -158,7 +192,7 @@ async function pollCurrentConversation(): Promise<void> {
     // 首页新会话获得真实 id → 'default' 桶迁移到真实对话（与 fetch hook 占位迁移一致）
     todosServer?.store.moveDefaultTo(next)
   }
-  win?.webContents.send('mcp:conversation', { convId: next, at: Date.now() })
+  sendToWin('mcp:conversation', { convId: next, at: Date.now() })
   void syncTodosGlobals()
 }
 
@@ -444,8 +478,12 @@ async function createWindow() {
   }
   win.on('resize', layout)
   // 最大化状态变化通知渲染进程（切换标题栏按钮图标）
-  win.on('maximize', () => win?.webContents.send('window:maximized', true))
-  win.on('unmaximize', () => win?.webContents.send('window:maximized', false))
+  win.on('maximize', () => sendToWin('window:maximized', true))
+  win.on('unmaximize', () => sendToWin('window:maximized', false))
+  // 窗口销毁后置空引用：后台定时器/异步任务不会再对已销毁的 webContents 发消息
+  win.on('closed', () => {
+    win = undefined
+  })
   registerCtrlR(win.webContents)
   registerDevToolsShortcut(win.webContents)
 
@@ -461,6 +499,13 @@ async function createWindow() {
   chatView.setBackgroundColor('#fff')
   // 与全局指纹一致（app.userAgentFallback / session 层已伪装，这里显式设置视图 UA）
   chatView.webContents.setUserAgent(CHROME_UA)
+  // ChatGPT 的 OAuth 授权弹窗（window.open）→ 路由回同一视图加载，应用内自动完成授权，不依赖系统弹窗
+  chatView.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//.test(url)) {
+      void chatView?.webContents.loadURL(url)
+    }
+    return { action: 'deny' }
+  })
   chatView.webContents.on('did-finish-load', () => {
     // ChatGPT 是 SPA，data-theme 渲染完成后才设置；延迟注入并重试一次
     setTimeout(() => { void applyChatTheme(currentThemeDark) }, 1500)
@@ -546,7 +591,7 @@ function createOverlayWindow() {
 function pushGatewayError(error: unknown, method: string) {
   const message = error instanceof Error ? error.message : String(error)
   console.error(`[gateway] ${method} 失败:`, message)
-  win?.webContents.send('mcp:event', {
+  sendToWin('mcp:event', {
     direction: 'system',
     method,
     payload: { error: message },
@@ -597,6 +642,55 @@ async function applyGatewayConfig(): Promise<GatewayReloadResult> {
     }
   }
   return { restarted: false, restartError: '网关重启失败（多次尝试后仍未恢复）' }
+}
+
+/** 上一次同步公网隧道时用的配置指纹（没变化就不重建，避免无关保存把运行中的隧道重启） */
+let tunnelManagerKey = ''
+
+/**
+ * 按当前配置同步 app 层隧道管理器（见 tunnel-manager.ts）：
+ * 公网配置就绪（publicEnabled + domain + tunnelId + cloudflaredBin）→ 创建/重建管理器；
+ * 否则销毁。向导成功 / 配置保存 / 网关启动时调用，让公网配置"保存即生效"，无需重启应用
+ * （纯新手用户启动时 publicEnabled=false 不会创建管理器，向导完成后靠这里补建）。
+ */
+async function syncTunnelManager(): Promise<void> {
+  const cfg = config.gateway
+  const key = [cfg.publicEnabled, cfg.domain, cfg.tunnelId, cfg.cloudflaredBin, cfg.tunnelConfigPath ?? ''].join('|')
+  if (key === tunnelManagerKey) return
+  tunnelManagerKey = key
+  if (tunnelManager) {
+    await tunnelManager.stop().catch(() => undefined)
+    tunnelManager = undefined
+  }
+  if (!(cfg.publicEnabled && cfg.domain && cfg.tunnelId && cfg.cloudflaredBin)) return
+  tunnelManager = new TunnelManager({
+    bin: cfg.cloudflaredBin,
+    tunnelId: cfg.tunnelId,
+    configPath: cfg.tunnelConfigPath || undefined,
+    domain: cfg.domain,
+    getProbe: () => gateway.getTunnelProbe(),
+  })
+}
+
+/**
+ * 探测现有的隧道配置文件（设置页据此决定是否显示该字段）：
+ * 优先 free-codex 自己的 userData/cloudflared.yml，其次 codex-mcp 的 ~/.codex-mcp/cloudflared.yml
+ * （后者只有 service 指向 free-codex 网关端口时才复用，避免把流量转到 codex-mcp 自己的端口）。
+ */
+function resolveTunnelConfigPath(): string | undefined {
+  if (config.gateway.tunnelConfigPath) return config.gateway.tunnelConfigPath
+  const userDataYml = path.join(app.getPath('userData'), 'cloudflared.yml')
+  if (existsSync(userDataYml)) return userDataYml
+  const codexYml = path.join(app.getPath('home'), '.codex-mcp', 'cloudflared.yml')
+  if (existsSync(codexYml)) {
+    try {
+      const text = readFileSync(codexYml, 'utf8')
+      if (new RegExp(`service:\\s*https?://[^:/]+:${config.gateway.port}(?:\\s|$)`).test(text)) return codexYml
+    } catch {
+      /* 读不了就忽略 */
+    }
+  }
+  return undefined
 }
 
 /**
@@ -658,10 +752,48 @@ function checkTunnelStatus(): Promise<TunnelStatus> {
   return tunnelStatusCheck
 }
 
+/** 向主窗口安全发送消息（窗口已销毁时静默跳过，避免 Object has been destroyed） */
+function sendToWin(channel: string, ...args: unknown[]): void {
+  if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
+    win.webContents.send(channel, ...args)
+  }
+}
+
 /** 检测并推送公网状态到渲染层（titlebar 指示器），返回最新状态 */
 async function pushTunnelStatus(): Promise<TunnelStatus> {
   const status = await checkTunnelStatus()
-  win?.webContents.send('tunnel:status', status)
+  sendToWin('tunnel:status', status)
+  return status
+}
+
+/** 检测右上角插件状态（freecodex 连接器已安装与否） */
+async function checkPluginStatus(): Promise<PluginStatus> {
+  const base = { checkedAt: Date.now() }
+  const domain = config?.gateway?.domain?.trim()
+  if (!domain) return { ...base, state: 'no-domain' }
+  try {
+    const login = await isChatgptLoggedIn()
+    if (!login.loggedIn) return { ...base, state: 'no-login' }
+  } catch {
+    return { ...base, state: 'no-login' }
+  }
+  const url = `https://${domain}/mcp`
+  try {
+    const catalogJson = await readConnectorCatalog()
+    const plugin = await findPlugin({ url }, catalogJson)
+    if (plugin) {
+      return { ...base, state: 'installed', displayName: plugin.displayName || plugin.name, appId: plugin.canonicalAppId }
+    }
+    return { ...base, state: 'not-installed' }
+  } catch {
+    return { ...base, state: 'not-installed' }
+  }
+}
+
+/** 检测并推送右上角插件状态（titlebar 指示器） */
+async function pushPluginStatus(): Promise<PluginStatus> {
+  const status = await checkPluginStatus()
+  sendToWin('plugin:status', status)
   return status
 }
 
@@ -746,7 +878,7 @@ app.on('second-instance', () => {
   win.focus()
 })
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // 未获得单实例锁 → 已有实例在运行，直接退出
   if (!gotSingleInstanceLock) {
     app.quit()
@@ -758,6 +890,33 @@ app.whenReady().then(() => {
   startChatgptTokenCapture()
 
   config = loadConfig()
+  // 反向同步（一次性）：本地已有一套 codex-mcp 公网配置、free-codex 还没配置公网 →
+  // 采纳 codex 的域名/Tunnel，并持久化（含生成 free-codex 自己端口的隧道配置，不沿用 codex 的旧 yml）
+  if (importCodexPublicConfig(config)) {
+    if (config.gateway.domain && config.gateway.tunnelId && !config.gateway.tunnelConfigPath) {
+      try {
+        config.gateway.tunnelConfigPath = await generateTunnelConfigFile({
+          domain: config.gateway.domain,
+          tunnelId: config.gateway.tunnelId,
+          serviceHost: config.gateway.host || '127.0.0.1',
+          servicePort: config.gateway.port,
+        })
+        config.cloudflare.configPath = config.gateway.tunnelConfigPath
+      } catch (err) {
+        console.warn('[config] 导入后生成 cloudflared.yml 失败:', err instanceof Error ? err.message : String(err))
+      }
+    }
+    saveConfig(config)
+  }
+  // 探测现有隧道配置文件并回填路径（设置页据此决定是否显示「tunnel 配置文件」字段）
+  const detectedYml = resolveTunnelConfigPath()
+  if (detectedYml) config.gateway.tunnelConfigPath = detectedYml
+  // 启动即把 free-codex 配置写回 ~/.codex-mcp（用户删掉 codex-mcp 配置后自动重建，供独立 `codex-mcp` 复用）
+  try {
+    syncCodexMcpConfig(config)
+  } catch (err) {
+    console.warn('[codex-sync] 启动写回 ~/.codex-mcp 失败:', err instanceof Error ? err.message : String(err))
+  }
   gateway = new NodeMcpGateway(config.gateway, {
     getMcpServers: () => {
       // todos 下游 server（enabled 且运行中）注入 mcpServers，hub 启动时自动连接
@@ -779,34 +938,32 @@ app.whenReady().then(() => {
     filePath: path.join(app.getPath('userData'), 'todos.json'),
     getConvId: () => currentConvId,
     onChange: () => {
-      win?.webContents.send('todos:changed', todosUiState())
+      sendToWin('todos:changed', todosUiState())
       void syncTodosGlobals()
     },
   })
   if (config.todos.enabled) {
     todosServer.start().catch((err) => console.warn('[todos] server 启动失败:', err))
   }
-  // cloudflared 作为 app 层能力：独立于网关生命周期常驻，公网不可达时才拉起（见 tunnel-manager.ts）
-  if (config.gateway.publicEnabled && config.gateway.domain && config.gateway.tunnelId && config.gateway.cloudflaredBin) {
-    tunnelManager = new TunnelManager({
-      bin: config.gateway.cloudflaredBin,
-      tunnelId: config.gateway.tunnelId,
-      configPath: config.gateway.tunnelConfigPath || undefined,
-      domain: config.gateway.domain,
-      getProbe: () => gateway.getTunnelProbe(),
-    })
-  }
-  // 公网连通状态轮询（titlebar 指示器；网关启停/隧道 ensure 也会触发即时推送）
-  tunnelStatusTimer = setInterval(() => void pushTunnelStatus(), 30_000)
+  // cloudflared 作为 app 层能力：独立于网关生命周期常驻，公网不可达时才拉起（见 tunnel-manager.ts）。
+  // 配置公网就绪才创建；之后向导/保存配置也会重新同步（syncTunnelManager），无需重启应用。
+  await syncTunnelManager()
+  // 公网连通状态轮询（titlebar 指示器；网关启停/隧道 ensure 也会触发即时推送）+ 右上角插件状态
+  tunnelStatusTimer = setInterval(() => {
+    void pushTunnelStatus()
+    void pushPluginStatus()
+  }, 30_000)
+  // 启动后立即推一次右上角插件状态（未登录/未配置域名时指示器会如实显示）
+  void pushPluginStatus()
   skills = new SkillManager(() => config.projectRoot || null)
-  gateway.onEvent((event) => win?.webContents.send('mcp:event', event))
+  gateway.onEvent((event) => sendToWin('mcp:event', event))
   // 工具调用（发起/完成）→ 记录会话归属 + 推送渲染层实时更新
   gateway.onToolCall((record, direction) => {
     if (direction === 'start') {
       // 会话 → 当前对话：调用发起时正在看的对话即归属（每次更新，重连/复用会话时自纠正）
       sessionToConv.set(record.sessionId, currentConvId)
     }
-    win?.webContents.send('mcp:toolCall', { record, direction })
+    sendToWin('mcp:toolCall', { record, direction })
   })
   // todos 强制循环：mcp_call(server=todos, tool=todos_*) 成功 → 打点 + 清页面 dirty（下一请求不再提醒）
   gateway.onToolCall((record, direction) => {
@@ -818,7 +975,7 @@ app.whenReady().then(() => {
   })
   // 引擎工具调用产生的文件 diff → 推送给渲染层（剥离 before/absPath 内部字段）
   gateway.onFileDiff((record) => {
-    win?.webContents.send('freecodex:fileDiff', {
+    sendToWin('freecodex:fileDiff', {
       id: record.id,
       path: record.path,
       toolName: record.toolName,
@@ -852,11 +1009,28 @@ app.whenReady().then(() => {
     config.gateway.domain = config.cloudflare.hostname || config.gateway.domain
     config.gateway.tunnelId = config.cloudflare.tunnelId || config.gateway.tunnelId
     config.gateway.tunnelConfigPath = config.cloudflare.configPath || config.gateway.tunnelConfigPath
+    // 手动配置公网：字段齐全但没填隧道配置文件 → 自动生成（与「一键创建」一致）。
+    // 凭据缺失等原因生成失败时保留原路径，网关启动会给出明确报错。
+    if (config.gateway.publicEnabled && config.gateway.domain && config.gateway.tunnelId && !config.gateway.tunnelConfigPath) {
+      try {
+        config.gateway.tunnelConfigPath = await generateTunnelConfigFile({
+          domain: config.gateway.domain,
+          tunnelId: config.gateway.tunnelId,
+          serviceHost: config.gateway.host || '127.0.0.1',
+          servicePort: config.gateway.port,
+        })
+        config.cloudflare.configPath = config.gateway.tunnelConfigPath
+      } catch (err) {
+        console.warn('[config] 自动生成 cloudflared.yml 失败:', err instanceof Error ? err.message : String(err))
+      }
+    }
     saveConfig(config)
     // 代理可能在保存中变化 → 同步到引擎 outbound 环境变量
     applyGatewayProxyEnv(config.proxy)
     // 项目路径可能在保存中变化 → 同步到 ChatGPT 页面
     void syncChatInjection()
+    // 公网配置可能变化 → 同步 app 层隧道管理器（配置未变则 no-op，不会重启运行中的隧道）
+    await syncTunnelManager()
     // Gateway 运行中 → 停止后应用新配置并自动重启
     return applyGatewayConfig()
   })
@@ -883,6 +1057,8 @@ app.whenReady().then(() => {
   ipcMain.handle('gateway:start', async () => {
     if (!config.projectRoot) throw new Error('请先选择项目目录')
     config.gateway.projectRoot = config.projectRoot
+    // 公网配置就绪时确保隧道管理器存在（向导刚完成/配置已保存的场景）
+    await syncTunnelManager()
     const url = await gateway.start()
     void ensureTunnel()
     void pushTunnelStatus()
@@ -925,12 +1101,7 @@ app.whenReady().then(() => {
   ipcMain.handle('chatgpt:plugins', () => listInstalledPlugins())
   ipcMain.handle('chatgpt:findPlugin', async (_e, by: { url?: string; name?: string; appId?: string }) => {
     // URL → appId 映射需要连接器目录（页面 system-connectors 缓存）
-    const wc = chatView?.webContents
-    const catalogJson = wc && !wc.isDestroyed()
-      ? await wc
-          .executeJavaScript(`(() => { try { const k = Object.keys(localStorage).find(k => /system-connectors/.test(k)); return k ? localStorage.getItem(k) : null; } catch (e) { return null; } })()`)
-          .catch(() => null)
-      : null
+    const catalogJson = await readConnectorCatalog()
     const result = await findPlugin(by ?? {}, catalogJson)
     // 记住读到的插件显示名（注入插件名留空时自动使用；变化时重新同步注入上下文）
     if (result?.displayName && result.displayName !== detectedPluginName) {
@@ -945,6 +1116,49 @@ app.whenReady().then(() => {
     return result
   })
   ipcMain.handle('chatgpt:probeMcp', (_e, url: string) => probeMcpOAuthConfig(url))
+  // cloudflared 路径：下载（已有则直接用）/ 文件选择（设置页无需手敲路径）
+  ipcMain.handle('cloudflare:ensureBin', async () => {
+    try {
+      const result = await ensureCloudflaredBin(config.gateway.cloudflaredBin || undefined)
+      return { ok: true, path: result.path, downloaded: result.downloaded, version: result.version }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+  ipcMain.handle('cloudflare:pickBin', async () => {
+    if (!win) return { ok: false, error: '窗口不可用' }
+    const result = await dialog.showOpenDialog(win, {
+      title: '选择 cloudflared 可执行文件',
+      properties: ['openFile'],
+      filters: [
+        { name: '可执行文件', extensions: ['exe'] },
+        { name: '所有文件', extensions: ['*'] },
+      ],
+    })
+    if (result.canceled || !result.filePaths[0]) return { ok: false, canceled: true }
+    return { ok: true, path: result.filePaths[0] }
+  })
+  // 一键安装 MCP 连接器：无 OAuth 直连；有 OAuth 自动打开授权页并填密码提交（需要密码时返回 needPassword）
+  ipcMain.handle('chatgpt:installMcp', async (_e, input: { url?: string; name?: string; password?: string }) => {
+    const url = input?.url?.trim()
+    if (!url) throw new Error('缺少 MCP 地址')
+    const catalogJson = await readConnectorCatalog()
+    const connector = findConnectorByUrl(catalogJson, url)
+    const result = await installMcpConnector({
+      mcpUrl: url,
+      name: input.name?.trim() || connector?.name || 'free-codex',
+      connectorId: connector?.id,
+      password: input.password,
+      deps: {
+        chatView: chatView?.webContents ?? null,
+        showView: () => setViewVisible(true),
+        pollInstalled: (timeoutMs) => pollPluginInstalled(url, timeoutMs),
+      },
+    })
+    // 安装/授权后立即刷新右上角插件状态（titlebar 指示器）
+    void pushPluginStatus()
+    return result
+  })
 
   // ---------- 新会话注入内容（项目路径 / 插件名 / AGENTS.md / CLAUDE.md / skills）----------
   ipcMain.handle('injections:get', () => config.injections)
@@ -1047,7 +1261,6 @@ app.whenReady().then(() => {
   })
 
   // ---------- 一键创建 Cloudflare Tunnel（向导式，复用 codex-mcp dist 模块）----------
-  let tunnelCoordinator: TunnelSetupCoordinator | null = null
   let pendingTunnelAsk: { id: number; resolve: (v: boolean) => void; reject: (e: Error) => void } | null = null
 
   /** 向导确认问题 → 推送渲染层弹确认框，等待 tunnel:answer / tunnel:cancel 回传 */
@@ -1058,7 +1271,7 @@ app.whenReady().then(() => {
         return
       }
       pendingTunnelAsk = { id: ask.id, resolve, reject }
-      win?.webContents.send('tunnel:ask', ask)
+      sendToWin('tunnel:ask', ask)
     })
   }
 
@@ -1067,7 +1280,7 @@ app.whenReady().then(() => {
     if (!input?.domain?.trim()) throw new Error('请填写公网域名')
     const coordinator = new TunnelSetupCoordinator({
       ask: askViaIpc,
-      onProgress: (event) => win?.webContents.send('tunnel:progress', event),
+      onProgress: (event) => sendToWin('tunnel:progress', event),
     })
     tunnelCoordinator = coordinator
     try {
@@ -1097,8 +1310,12 @@ app.whenReady().then(() => {
         tunnelConfigPath: result.configPath,
       }
       saveConfig(config)
+      // 同步并拉起 app 层隧道管理器（纯新手启动时 publicEnabled=false 没建，这里补建并立即启动隧道）
+      await syncTunnelManager()
       // Gateway 运行中 → 自动重启以应用公网配置
       const reload = await applyGatewayConfig()
+      void ensureTunnel()
+      void pushTunnelStatus()
       return { ...result, gateway: reload }
     } finally {
       tunnelCoordinator = null
@@ -1165,19 +1382,19 @@ app.whenReady().then(() => {
   ipcMain.handle('diff:list', () => listDiffRecords().map(stripDiffRecord))
   ipcMain.handle('diff:revertFile', (_e, id: string) => {
     const result = revertFile(id)
-    if (result.ok) win?.webContents.send('diff:removed', id)
+    if (result.ok) sendToWin('diff:removed', id)
     return result
   })
   ipcMain.handle('diff:confirmFile', (_e, id: string) => {
     const result = confirmFile(id)
-    if (result.ok) win?.webContents.send('diff:removed', id)
+    if (result.ok) sendToWin('diff:removed', id)
     return result
   })
   ipcMain.handle('diff:undoHunk', (_e, request: { id: string; hunkIndex: number }) => {
     const result = undoHunk(request?.id, request?.hunkIndex)
     if (result.ok) {
-      if (result.diff === null) win?.webContents.send('diff:removed', request.id)
-      else if (result.diff) win?.webContents.send('diff:updated', stripDiffRecord(result.diff))
+      if (result.diff === null) sendToWin('diff:removed', request.id)
+      else if (result.diff) sendToWin('diff:updated', stripDiffRecord(result.diff))
     }
     return result
   })
@@ -1215,7 +1432,7 @@ app.whenReady().then(() => {
   ipcMain.handle('project:openFolder', async () => {
     const result = await projects.openFolder()
     if (result.ok) {
-      win?.webContents.send('project:changed', result.state)
+      sendToWin('project:changed', result.state)
       void syncChatInjection()
       // 运行中自动重启网关，使新项目地址立即生效
       return { ...result, gateway: await applyGatewayConfig() }
@@ -1225,7 +1442,7 @@ app.whenReady().then(() => {
   ipcMain.handle('project:activate', async (_e, p: string) => {
     const result = await projects.activate(p)
     if (result.ok) {
-      win?.webContents.send('project:changed', result.state)
+      sendToWin('project:changed', result.state)
       void syncChatInjection()
       // 运行中自动重启网关，使新项目地址立即生效
       return { ...result, gateway: await applyGatewayConfig() }
@@ -1307,11 +1524,42 @@ app.whenReady().then(() => {
   }
 })
 
-app.on('before-quit', () => {
-  if (tunnelStatusTimer) clearInterval(tunnelStatusTimer)
-  void gateway?.stop()
-  void todosServer?.stop()
-  void tunnelManager?.stop()
+// ------------------------------------------------------------
+// 退出清理：窗口关闭 → window-all-closed → app.quit() → before-quit 先停干净
+// 所有后台（网关 HTTP 服务 / 下游 MCP 子进程 / cloudflared 隧道 / todos），
+// 再强制退出。之前是 fire-and-forget（void gateway?.stop()…），进程先退，
+// 子进程（cloudflared、MCP stdio server）没人收，残留在后台。
+// ------------------------------------------------------------
+let shuttingDown = false
+
+async function shutdownBackground(): Promise<void> {
+  if (shuttingDown) return
+  shuttingDown = true
+  console.log('[quit] 正在停止后台服务…')
+  if (tunnelStatusTimer) {
+    clearInterval(tunnelStatusTimer)
+    tunnelStatusTimer = undefined
+  }
+  if (convPollTimer) {
+    clearInterval(convPollTimer)
+    convPollTimer = null
+  }
+  // 向导登录中的 cloudflared 子进程一并终止
+  tunnelCoordinator?.cancel()
+  const jobs: Promise<unknown>[] = []
+  // gateway.stop() → server.close() → hub.close() → 下游 stdio MCP 子进程会被终止
+  if (gateway) jobs.push(gateway.stop().catch((err) => console.warn('[quit] 网关停止失败:', err instanceof Error ? err.message : err)))
+  if (todosServer) jobs.push(todosServer.stop().catch((err) => console.warn('[quit] todos 停止失败:', err instanceof Error ? err.message : err)))
+  // tunnelManager.stop() → CloudflaredSidecar.stop() → taskkill 整棵进程树
+  if (tunnelManager) jobs.push(tunnelManager.stop().catch((err) => console.warn('[quit] 隧道停止失败:', err instanceof Error ? err.message : err)))
   overlayWin?.destroy()
+  // 最多等 5 秒：个别下游不响应也不能卡住退出
+  await Promise.race([Promise.all(jobs), new Promise((resolve) => setTimeout(resolve, 5000))])
+}
+
+app.on('before-quit', (event) => {
+  // 先停干净再退出（app.exit 不再触发 before-quit，不会死循环）
+  event.preventDefault()
+  void shutdownBackground().then(() => app.exit(0))
 })
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })

@@ -15,7 +15,8 @@
  *                  POST /backend-api/aip/connectors/links/{noauth|oauth|api_key} → 建立连接
  */
 
-import { net, session, type Session } from 'electron'
+import { net, session, type Session, type WebContents } from 'electron'
+import { generateAdminPassword, hasAdminPassword, setAdminPassword } from './auth'
 
 /** 捕获到的最新 chatgpt.com Bearer token（webRequest 层，无需侵入页面） */
 let chatgptToken: string | null = null
@@ -100,6 +101,47 @@ export async function ensureDeveloperMode(): Promise<{ ok: boolean; developerMod
   return setDeveloperMode(true)
 }
 
+/**
+ * 连接器目录（URL → 插件 id/显示名 映射）。
+ * 不再依赖页面 localStorage 的 system-connectors 缓存（ChatGPT 现在不写了），
+ * 直接调后端连接器目录 API；返回与缓存同构的 `{ connectors: [...] }` JSON。
+ */
+/** 取当前 ChatGPT 用户 id（/backend-api/me；list_accessible 的 principals 需要） */
+async function getCurrentUserId(): Promise<string | undefined> {
+  try {
+    const { data } = await chatgptApi<{ id?: string; user?: { id?: string } }>('/backend-api/me')
+    const id = data?.id ?? data?.user?.id
+    return typeof id === 'string' && id ? id : undefined
+  } catch {
+    return undefined
+  }
+}
+
+export async function fetchConnectorCatalog(): Promise<string | null> {
+  // list_accessible 需要 body.principals（422 实测缺这个字段）。先拿用户 id 试标准格式，再回退空数组。
+  const uid = await getCurrentUserId()
+  const attempts: Array<{ label: string; body: Record<string, unknown> }> = [
+    ...(uid ? [{ label: 'user-id', body: { principals: [{ type: 'user', id: uid }] } }] : []),
+    { label: 'empty-array', body: { principals: [] } },
+  ]
+  for (const attempt of attempts) {
+    try {
+      const res = await chatgptApi<{
+        value?: { connectors?: Array<Record<string, unknown>> }
+        connectors?: Array<Record<string, unknown>>
+      }>('/backend-api/aip/connectors/list_accessible', { method: 'POST', body: attempt.body })
+      console.log(`[detect] list_accessible(${attempt.label}):`, res.status, res.raw.slice(0, 500))
+      const connectors = res.data?.value?.connectors ?? res.data?.connectors
+      if (Array.isArray(connectors) && connectors.length > 0) {
+        return JSON.stringify({ connectors })
+      }
+    } catch (err) {
+      console.warn(`[detect] list_accessible(${attempt.label}) 失败:`, err instanceof Error ? err.message : String(err))
+    }
+  }
+  return null
+}
+
 /** 已安装插件条目（ps/plugins/installed） */
 export type InstalledPlugin = {
   id: string
@@ -109,40 +151,88 @@ export type InstalledPlugin = {
   installedAt?: string
   /** 目录里的显示名（ChatGPT 界面展示的 MCP 名字，如 mycodex；内部名是 dev-<appid>） */
   displayName?: string
+  /** 原始响应条目（检测时按 URL 等字段兜底匹配用） */
+  raw?: Record<string, unknown>
 }
 
 /** 列出已安装插件 */
 export async function listInstalledPlugins(): Promise<InstalledPlugin[]> {
   const { data } = await chatgptApi<{ plugins: Array<Record<string, unknown>> }>('/backend-api/ps/plugins/installed?limit=1000')
-  return (data?.plugins ?? []).map((p) => ({
+  const plugins = (data?.plugins ?? []).map((p) => ({
     id: String(p.id ?? ''),
     name: String(p.name ?? ''),
     canonicalAppId: String(p.canonical_app_id ?? ''),
     status: String(p.status ?? ''),
     installedAt: String(p.installed_at ?? p.created_at ?? ''),
+    raw: p,
   }))
+  // 诊断：打印与 free-codex/indevs 相关的已装条目（含全部字段，便于校准匹配）
+  console.log(
+    '[detect] installed 总数:', plugins.length,
+    plugins.filter((p) => /indevs|free-codex|freecodex/i.test(JSON.stringify(p.raw ?? {}))).slice(0, 5),
+  )
+  return plugins
 }
 
-/** 按 MCP URL / 名称 / AppId 判断插件是否已安装（canonical_app_id 或名称匹配） */
+/** oauth_config 探测结果缓存（URL → 连接器 id，60s TTL；避免轮询时反复探测） */
+let oauthIdCache: { url: string; id?: string; at: number } | null = null
+
+/** 按 MCP URL / 名称 / AppId 判断插件是否已安装（canonical_app_id / 名称 / URL 字段匹配） */
 export async function findPlugin(
   by: { url?: string; name?: string; appId?: string },
-  /** 连接器目录 JSON（页面 system-connectors 缓存），用于 URL → 显示名/appId 映射 */
+  /** 连接器目录 JSON（system-connectors 缓存），用于 URL → 显示名/appId 映射 */
   catalogJson?: string | null,
 ): Promise<InstalledPlugin | null> {
   const plugins = await listInstalledPlugins()
   const targetUrl = by.url
-  const targetAppId = targetUrl ? findConnectorByUrl(catalogJson, targetUrl)?.id : undefined
+  const connector = targetUrl ? findConnectorByUrl(catalogJson, targetUrl) : null
+
+  // 目录缺失/未命中 → 用 oauth_config 探测拿连接器 id（URL → id 的另一条可靠路径）
+  if (targetUrl && !connector) {
+    let id: string | undefined
+    if (oauthIdCache && oauthIdCache.url === targetUrl && Date.now() - oauthIdCache.at < 60_000) {
+      id = oauthIdCache.id
+    } else {
+      try {
+        const probe = await probeMcpOAuthConfig(targetUrl)
+        const m = probe.raw.match(/asdk_app_[0-9a-fA-F]{16,}/)
+        id = m?.[0]
+        oauthIdCache = { url: targetUrl, id, at: Date.now() }
+      } catch {
+        /* 探测失败忽略 */
+      }
+    }
+    if (id) {
+      const hit = plugins.find((p) => p.canonicalAppId === id)
+      if (hit) {
+        console.log('[detect] 通过 oauth_config 匹配到连接器:', id)
+        return { ...hit, displayName: hit.name }
+      }
+    }
+  }
+
+  const norm = (u: string) => (u || '').replace(/\/+$/, '').toLowerCase()
+  const target = targetUrl ? norm(targetUrl) : ''
   const hit = by.appId
     ? plugins.find((p) => p.canonicalAppId === by.appId)
     : by.name
       ? plugins.find((p) => p.name === by.name)
       : targetUrl
-        ? plugins.find((p) => p.canonicalAppId === targetAppId) ?? null
+        ? plugins.find(
+            (p) =>
+              (connector?.id && p.canonicalAppId === connector.id) ||
+              (connector?.name && p.name === connector.name) ||
+              // 兜底：已装条目里直接带目标 URL 的字段（如 connector/base_url/mcp_url）也能命中
+              (target &&
+                Object.entries(p.raw ?? {}).some(
+                  ([k, v]) => /url|base|endpoint|mcp/i.test(k) && typeof v === 'string' && norm(v).includes(target),
+                )),
+          ) ?? null
         : null
+  console.log('[detect] findPlugin:', { targetUrl, connectorId: connector?.id, connectorName: connector?.name, found: !!hit })
   if (!hit) return null
   // 补上目录显示名（ChatGPT 界面展示的 MCP 名字）
-  const display = targetUrl ? findConnectorByUrl(catalogJson, targetUrl) : null
-  return { ...hit, displayName: display?.name || hit.name }
+  return { ...hit, displayName: connector?.name || hit.name }
 }
 
 /** 连接器（插件）目录条目（system-connectors 缓存的同源接口） */
@@ -187,6 +277,7 @@ export async function probeMcpOAuthConfig(mcpUrl: string): Promise<{ oauthRequir
     '/backend-api/aip/connectors/mcp/oauth_config',
     { method: 'POST', body: { mcp_url: mcpUrl, custom_headers: [] } },
   )
+  console.log('[chatgpt] oauth_config:', raw.slice(0, 600))
   const cfg = data?.oauth_config
   const oauthRequired = cfg?.type === 'OAUTH' || !!cfg?.authorization_url
   return { oauthRequired, authorizationUrl: cfg?.authorization_url, raw }
@@ -219,6 +310,216 @@ export async function installMcpPlugin(input: {
     },
   })
   return { ok, linkId: data?.link_id, raw }
+}
+
+// ------------------------------------------------------------
+// 一键安装（尽量全自动）
+// 无 OAuth：后端 /links/noauth 直连建立连接。
+// 有 OAuth：打开 codex-mcp 网关自己的授权页（authorization_url），
+//   用连接密码自动填表提交（密码哈希不可逆，应用自己生成时才知道明文），
+//   授权回调后轮询确认插件已安装。
+// ------------------------------------------------------------
+
+export type InstallMcpConnectorResult = {
+  ok: boolean
+  installed?: boolean
+  /** 需要打开授权页（授权流程需要用户介入时的兜底地址） */
+  oauthUrl?: string
+  /** 已有连接密码但调用方没提供 → UI 让用户输入一次 */
+  needPassword?: boolean
+  /** 自动填表后仍停留在授权页（密码错误，服务端重新渲染表单） */
+  wrongPassword?: boolean
+  message?: string
+}
+
+export type InstallMcpDeps = {
+  /** 承载 OAuth 授权页的浏览器（ChatGPT 视图） */
+  chatView: WebContents | null
+  /** 需要用户介入时恢复视图显示 */
+  showView: () => void
+  /** 轮询直到插件被检测到已安装 */
+  pollInstalled: (timeoutMs: number) => Promise<boolean>
+}
+
+/** 在页面里轮询等待表达式为真（executeJavaScript；隐藏视图也能用） */
+async function waitForInPage(wc: WebContents, expr: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const ok = (await wc.executeJavaScript(expr).catch(() => false)) as boolean
+    if (ok) return true
+    await new Promise((r) => setTimeout(r, 500))
+  }
+  return false
+}
+
+/**
+ * 自动填写授权页的密码表单并提交。
+ * 表单是 codex-mcp 网关的静态 HTML：`<form method="post" action="/authorize">` +
+ * `#password` 输入框 + 隐藏字段。密码错误时服务端 401 重新渲染表单（表单不消失）；
+ * 密码正确则 302 重定向离开授权页（表单消失）。
+ */
+async function fillOauthPassword(wc: WebContents, password: string): Promise<'ok' | 'no-form' | 'wrong-password'> {
+  const formReady = await waitForInPage(wc, `!!document.querySelector('#password')`, 15_000)
+  if (!formReady) return 'no-form'
+  const pwd = JSON.stringify(password)
+  await wc
+    .executeJavaScript(
+      `(() => { const p = document.querySelector('#password'); const f = p && p.closest('form'); if (!p || !f) return { ok:false }; p.value = ${pwd}; f.submit(); return { ok:true }; })()`,
+    )
+    .catch(() => ({ ok: false }))
+  // 提交后轮询：表单消失 = 授权成功已重定向；一直停留 = 密码错误（服务端重新渲染）
+  const deadline = Date.now() + 12_000
+  while (Date.now() < deadline) {
+    const stillForm = (await wc.executeJavaScript(`!!document.querySelector('#password')`).catch(() => false)) as boolean
+    if (!stillForm) return 'ok'
+    await new Promise((r) => setTimeout(r, 1000))
+  }
+  return 'wrong-password'
+}
+
+/**
+ * 在 ChatGPT 视图里驱动「添加插件」表单创建连接器（真实可用路径，已 CDP 验证）：
+ * 打开 /plugins#settings/Connectors?create-connector=true → 注入 JS 填 名称+URL →
+ * 等 OAuth 探测完成 → 勾选风险确认 → 点「创建」。返回是否创建成功。
+ */
+async function createConnectorViaUi(wc: WebContents, mcpUrl: string, name: string): Promise<{ ok: boolean; reason?: string }> {
+  await wc.loadURL('https://chatgpt.com/plugins#settings/Connectors?create-connector=true').catch(() => undefined)
+  const formReady = await waitForInPage(wc, `!!document.querySelector('input[placeholder*="example.com"]')`, 20_000)
+  if (!formReady) return { ok: false, reason: '添加插件表单没有加载出来' }
+
+  const filled = await wc
+    .executeJavaScript(
+      `(() => {
+        const setVal = (el, v) => {
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+          setter.call(el, v);
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        };
+        const nameInput = document.querySelector('input[placeholder*="自定义工具"]');
+        const urlInput = document.querySelector('input[placeholder*="example.com"]');
+        if (!nameInput || !urlInput) return { ok: false, reason: '输入框未找到' };
+        setVal(nameInput, ${JSON.stringify(name)});
+        setVal(urlInput, ${JSON.stringify(mcpUrl)});
+        return { ok: true };
+      })()`,
+    )
+    .catch(() => ({ ok: false }))
+  if (!filled?.ok) return { ok: false, reason: filled?.reason ?? '填充表单失败' }
+
+  // 等 OAuth 探测完成（创建按钮变为可用）
+  const ready = await waitForInPage(
+    wc,
+    `Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === '创建' && !b.disabled)`,
+    20_000,
+  )
+  if (!ready) return { ok: false, reason: '创建按钮没有就绪（OAuth 探测未完成）' }
+
+  const created = await wc
+    .executeJavaScript(
+      `(() => {
+        const cb = document.querySelector('input[type="checkbox"]');
+        if (cb && !cb.checked) {
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'checked').set;
+          setter.call(cb, true);
+          cb.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === '创建');
+        if (btn && !btn.disabled) { btn.click(); return { ok: true }; }
+        return { ok: false, reason: '创建按钮不可用' };
+      })()`,
+    )
+    .catch(() => ({ ok: false }))
+  if (!created?.ok) return { ok: false, reason: created?.reason ?? '点击创建失败' }
+
+  // 等弹窗关闭（创建完成）
+  const closed = await waitForInPage(wc, `!document.querySelector('input[placeholder*="example.com"]')`, 20_000)
+  return closed ? { ok: true } : { ok: false, reason: '创建后表单未关闭（可能有报错）' }
+}
+
+/** 一键安装 MCP 连接器（尽量全自动；OAuth 需要连接密码） */
+export async function installMcpConnector(input: {
+  mcpUrl: string
+  name: string
+  connectorId?: string
+  password?: string
+  deps: InstallMcpDeps
+}): Promise<InstallMcpConnectorResult> {
+  const { mcpUrl, name, connectorId, password, deps } = input
+  const wc = deps.chatView
+
+  // 1) 探测 OAuth 配置
+  const probe = await probeMcpOAuthConfig(mcpUrl)
+
+  // 2) 尚未安装 → 驱动 ChatGPT「添加插件」表单创建连接器（实测有效；已建则跳过）
+  const already = await deps.pollInstalled(3000)
+  if (!already && wc && !wc.isDestroyed()) {
+    const created = await createConnectorViaUi(wc, mcpUrl, name)
+    if (!created.ok) {
+      deps.showView()
+      return { ok: false, message: `自动添加插件失败：${created.reason ?? '未知原因'}，已在页面打开，可手动完成` }
+    }
+  }
+
+  // 3) 无 OAuth：创建流程已建立链接 → 确认安装
+  if (!probe.oauthRequired) {
+    const installed = await deps.pollInstalled(20_000)
+    return { ok: true, installed }
+  }
+
+  // 4) OAuth：完成授权（自动填连接密码）
+  let effectivePassword = password
+  if (!effectivePassword) {
+    if (await hasAdminPassword()) {
+      // 已有密码但调用方没给 → 让 UI 输入一次（密码哈希不可逆，应用取不回明文）
+      return { ok: true, needPassword: true }
+    }
+    // 没有密码 → 自动生成并保存（应用自己知道明文，可全自动填表）
+    effectivePassword = await generateAdminPassword()
+    await setAdminPassword(effectivePassword).catch(() => undefined)
+  }
+
+  // 4.1) 建 ChatGPT 侧 OAuth 链接 → 完整授权 URL（回退 oauth_config 的地址）
+  let oauthUrl = probe.authorizationUrl
+  if (input.connectorId) {
+    try {
+      const linkRes = await chatgptApi<{ oauth_url?: string; oauth_authorization_url?: string }>(
+        '/backend-api/aip/connectors/links/oauth',
+        {
+          method: 'POST',
+          body: {
+            connector_id: input.connectorId,
+            name: input.name,
+            action_names: [],
+            link_params: {},
+            action_param_scopes: [],
+          },
+        },
+      )
+      console.log('[install-mcp] links/oauth:', linkRes.status, linkRes.raw.slice(0, 400))
+      oauthUrl = linkRes.data?.oauth_url ?? linkRes.data?.oauth_authorization_url ?? oauthUrl
+    } catch (err) {
+      console.warn('[install-mcp] links/oauth 失败，回退 oauth_config 地址:', err instanceof Error ? err.message : String(err))
+    }
+  }
+  if (!oauthUrl) {
+    deps.showView()
+    return { ok: false, message: '无法获取 OAuth 授权地址（连接器已添加，但需在 ChatGPT 页面完成授权）' }
+  }
+
+  // 4.2) 打开授权页并自动填密码
+  if (!wc || wc.isDestroyed()) return { ok: false, message: 'ChatGPT 视图不可用' }
+  await wc.loadURL(oauthUrl).catch(() => undefined)
+  const filled = await fillOauthPassword(wc, effectivePassword)
+  if (filled === 'no-form') {
+    deps.showView()
+    return { ok: false, oauthUrl, message: '授权页没有加载出表单，请在打开的页面手动完成' }
+  }
+  if (filled === 'wrong-password') {
+    return { ok: false, oauthUrl, wrongPassword: true, message: '连接密码不正确，请重试' }
+  }
+  const installed = await deps.pollInstalled(45_000)
+  return { ok: true, installed }
 }
 
 // ------------------------------------------------------------

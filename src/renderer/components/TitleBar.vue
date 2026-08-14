@@ -39,6 +39,19 @@
         <WifiOffIcon v-else class="size-4 text-muted-foreground" />
       </button>
 
+      <!-- 插件状态（freecodex 连接器；点击回到设置页插件区） -->
+      <button
+        class="flex h-9 w-10 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+        aria-label="插件状态"
+        :title="pluginTitle"
+        @click="openSettings"
+      >
+        <Loader2Icon v-if="pluginState === 'checking'" class="size-4 animate-spin text-yellow-500" />
+        <PlugZapIcon v-else-if="pluginState === 'installed'" class="size-4 text-emerald-500" />
+        <PlugZapIcon v-else-if="pluginState === 'not-installed'" class="size-4 text-red-500" />
+        <PlugZapIcon v-else class="size-4 text-muted-foreground" />
+      </button>
+
       <!-- 回到 ChatGPT 首页（Free Codex 特有：WebContentsView 加载起始 URL） -->
       <button
         class="flex h-9 w-10 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
@@ -104,6 +117,7 @@ import {
   Loader2Icon,
   MinusIcon,
   MoonIcon,
+  PlugZapIcon,
   SettingsIcon,
   SquareIcon,
   SunIcon,
@@ -111,7 +125,7 @@ import {
   WifiOffIcon,
   XIcon,
 } from 'lucide-vue-next'
-import type { FreeCodexWindowControls, ProjectState, TunnelStatus } from '../freecodex'
+import type { FreeCodexWindowControls, PluginStatus, ProjectState, TunnelStatus } from '../freecodex'
 
 const windowControls: FreeCodexWindowControls = window.freeCodex.windowControls
 const router = useRouter()
@@ -162,6 +176,29 @@ async function refreshTunnelStatus(): Promise<void> {
   tunnelStatus.value = await window.freeCodex.tunnelStatus()
 }
 
+// ---------- 右上角插件状态（freecodex 连接器）----------
+const pluginStatus = ref<PluginStatus>({ state: 'checking', checkedAt: 0 })
+let unsubscribePluginStatus: (() => void) | undefined
+
+const pluginState = computed(() => pluginStatus.value.state)
+
+/** 悬浮提示：插件状态详情 */
+const pluginTitle = computed(() => {
+  const s = pluginStatus.value
+  switch (s.state) {
+    case 'installed':
+      return `插件: 已安装 (${s.displayName ?? ''})`
+    case 'not-installed':
+      return '插件: 未安装'
+    case 'no-login':
+      return '插件: 未登录 ChatGPT'
+    case 'no-domain':
+      return '插件: 未配置公网域名'
+    default:
+      return '插件: 检测中…'
+  }
+})
+
 // ---------- 主题切换 ----------
 const isDark = ref(document.documentElement.classList.contains('dark'))
 
@@ -210,6 +247,10 @@ onMounted(async () => {
     tunnelStatus.value = status as TunnelStatus
   })
   void refreshTunnelStatus()
+  // 右上角插件状态：订阅主进程推送（主进程 30s 轮询 + 安装/登录后即时推）
+  unsubscribePluginStatus = window.freeCodex.onPluginStatus((status) => {
+    pluginStatus.value = status as PluginStatus
+  })
   // 启动时应用当前主题到 ChatGPT 页面（ChatGPT 视图可能已打开）
   window.freeCodex.setTheme(isDark.value).catch(() => undefined)
 })
@@ -218,6 +259,7 @@ onUnmounted(() => {
   unsubscribe?.()
   unsubscribeProjectChanged?.()
   unsubscribeTunnelStatus?.()
+  unsubscribePluginStatus?.()
 })
 </script>
 

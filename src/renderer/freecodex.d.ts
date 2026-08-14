@@ -158,6 +158,15 @@ export interface TunnelStatus {
   detail: string
 }
 
+/** 右上角插件状态（titlebar 指示器） */
+export interface PluginStatus {
+  /** checking=检测中 installed=已安装 not-installed=未安装 no-login=未登录 no-domain=未配置公网域名 */
+  state: 'checking' | 'installed' | 'not-installed' | 'no-login' | 'no-domain'
+  displayName?: string
+  appId?: string
+  checkedAt: number
+}
+
 /** 网关事件（Logs 面板） */
 export interface GatewayEvent {
   direction: 'system' | 'request' | 'response'
@@ -434,6 +443,8 @@ export interface FreeCodexApi {
   tunnelStatus: () => Promise<TunnelStatus>
   /** 订阅公网连通状态推送（主进程检测后主动下发），返回取消订阅函数 */
   onTunnelStatus: (cb: (status: TunnelStatus) => void) => () => void
+  /** 订阅右上角插件状态推送（freecodex 连接器已安装与否） */
+  onPluginStatus: (cb: (status: PluginStatus) => void) => () => void
   setPanelCollapsed: (collapsed: boolean) => Promise<void>
   /** 设置 ChatGPT 页面主题（主程序亮/暗主题切换时注入 CSS 同步） */
   setTheme: (dark: boolean) => Promise<{ ok: boolean }>
@@ -482,6 +493,15 @@ export interface FreeCodexApi {
     devModeStatus: () => Promise<{ developerMode: boolean; lockdownMode: boolean }>
     /** 确保开发者模式开启（未开启则自动开启） */
     ensureDevMode: () => Promise<{ ok: boolean; developerMode: boolean; message?: string }>
+    /** 一键安装 MCP 连接器（无 OAuth 直连；OAuth 自动打开授权页，需要密码时返回 needPassword） */
+    installMcp: (input: { url: string; name?: string; password?: string }) => Promise<{
+      ok: boolean
+      installed?: boolean
+      oauthUrl?: string
+      needPassword?: boolean
+      wrongPassword?: boolean
+      message?: string
+    }>
     /** 已安装插件列表 */
     plugins: () => Promise<InstalledPlugin[]>
     /** 按 URL/名称/AppId 查找已安装插件 */
@@ -566,6 +586,10 @@ export interface FreeCodexApi {
   answerTunnelAsk: (id: number, approved: boolean) => Promise<unknown>
   /** 取消进行中的向导 */
   cancelTunnelSetup: () => Promise<void>
+  /** cloudflared 路径：确保可用（已有直接用，没有自动下载 codex-mcp 内置版本） */
+  ensureCloudflaredBin: () => Promise<{ ok: boolean; path?: string; downloaded?: boolean; version?: string; error?: string }>
+  /** cloudflared 路径：系统文件选择器 */
+  pickCloudflaredBin: () => Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>
   /** 订阅向导进度日志，返回取消订阅函数 */
   onTunnelProgress: (cb: (event: TunnelProgressEvent) => void) => () => void
   /** 订阅向导确认问题，返回取消订阅函数 */
