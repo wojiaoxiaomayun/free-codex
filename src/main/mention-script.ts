@@ -39,6 +39,8 @@ export const MENTION_SCRIPT = `
   /** 触发面板的输入元素（面板选中后插入用）与触发字符（@ 或 /） */
   window.__freehubMentionEl = null;
   window.__freehubTriggerChar = null;
+  /** 触发字符在输入框里的位置（插入时据此精确删触发字符；失焦后 selectionStart 不可靠） */
+  window.__freehubTriggerPos = -1;
   /** 挂起的消息开头斜杠（beforeinput 拦截后，选中技能/关闭面板时消费） */
   window.__freehubPendingSlash = false;
   /** 最近一次恢复斜杠的时间戳（防止恢复写回的 / 再次触发面板） */
@@ -77,6 +79,11 @@ export const MENTION_SCRIPT = `
   function trigger(char, el) {
     window.__freehubMentionEl = el;
     window.__freehubTriggerChar = char;
+    // 记录触发位置：textarea/input 用 selectionStart（@ 已写入，光标在它后面）
+    window.__freehubTriggerPos =
+      el.tagName === 'TEXTAREA' || el.tagName === 'INPUT'
+        ? typeof el.selectionStart === 'number' ? el.selectionStart : 0
+        : -1;
     try {
       window.postMessage({ type: char === '@' ? 'freehub:mention-open' : 'freehub:skill-open' }, '*');
     } catch (e) { /* ignore */ }
@@ -131,6 +138,11 @@ export const MENTION_SCRIPT = `
       if (!setter || !setter.set) setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
       var value = el.value || '';
       var start = typeof el.selectionStart === 'number' ? el.selectionStart : value.length;
+      // 优先用触发时记录的位置（面板搜索框聚焦后 selectionStart 可能失效 → 双字符）
+      if (window.__freehubTriggerPos >= 0) {
+        start = Math.min(window.__freehubTriggerPos, value.length);
+      }
+      window.__freehubTriggerPos = -1; // 用完即清
       // 光标前一字符是触发字符（@ 文件 / 技能）→ 替换为插入文本
       var removeCount = 0;
       if (start > 0 && (value.charAt(start - 1) === '@' || value.charAt(start - 1) === '/')) {

@@ -79,7 +79,7 @@ async function refresh(): Promise<void> {
   }
 }
 
-/** 选中文件：把 @file:相对路径 插入到 ChatGPT 输入框（替换触发的 @） */
+/** 选中文件：把 @file:相对路径 插入到 ChatGPT 输入框（替换触发的 @）；成功不弹 toast，避免打扰 */
 async function insertFile(file: ProjectFileEntry): Promise<void> {
   const reference = `@file:${file.relPath}`
   const result = await window.freeCodex.insertFileReference(reference)
@@ -88,7 +88,6 @@ async function insertFile(file: ProjectFileEntry): Promise<void> {
     return
   }
   open.value = false
-  toast.success('已插入文件引用', { description: reference })
 }
 
 let unsubscribe: (() => void) | undefined
