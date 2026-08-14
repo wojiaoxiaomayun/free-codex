@@ -84,6 +84,10 @@ export type Config = {
     /** 是否启用（启用时启动 todos server 并注入 mcpServers.todos） */
     enabled: boolean
   }
+  /** 连接密码明文（free-codex 自持，便于欢迎向导/设置页展示复制；codex-mcp 侧仍存哈希用于 OAuth 校验） */
+  connectionPassword?: string
+  /** 欢迎向导已跳过/完成（不再强制引导） */
+  onboardingSkipped?: boolean
   /** 下游 MCP 服务器（原先在 ~/.codex-mcp/mcp.json，现归 free-codex 自持） */
   mcpServers: Record<string, McpServerConfig>
 }

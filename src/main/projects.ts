@@ -5,11 +5,14 @@
  * 1. 确保目录存在（不存在则创建）
  * 2. 持久化 config.json 的 projectRoot + gateway.projectRoot（运行中的网关由
  *    上层 handler 调 applyGatewayConfig 自动重启使其立即生效）
- * 3. 更新 ~/.free-codex/projects.json 历史（去重、最近在前，最多 20 条）
+ * 3. 更新 userData/projects.json 历史（去重、最近在前，最多 20 条）
+ *
+ * 项目历史与主配置统一存放在 userData（%APPDATA%\free-codex），不再用 ~/.free-codex；
+ * 旧位置的 projects.json 首次读取时自动迁移。
  */
 
 import { app, dialog, type BrowserWindow } from 'electron'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { basename, dirname, join, resolve } from 'path'
 import type { Config } from './config'
 import type { NodeMcpGateway } from './mcp-gateway'
@@ -52,14 +55,39 @@ const HISTORY_LIMIT = 20
 // ------------------------------------------------------------
 
 function projectsFilePath(): string {
+  return join(app.getPath('userData'), 'projects.json')
+}
+
+/** 旧位置 ~/.free-codex/projects.json（迁移用） */
+function legacyProjectsFilePath(): string {
   return join(app.getPath('home'), '.free-codex', 'projects.json')
 }
 
-/** 读取项目历史（无文件返回空状态） */
+/** 读取项目历史（无文件返回空状态；旧位置存在时自动迁移） */
 function readProjects(): ProjectState {
   try {
-    if (!existsSync(projectsFilePath())) return { active: null, history: [] }
-    const data = JSON.parse(readFileSync(projectsFilePath(), 'utf-8')) as Partial<ProjectState>
+    const file = projectsFilePath()
+    if (!existsSync(file)) {
+      const legacy = legacyProjectsFilePath()
+      if (existsSync(legacy)) {
+        try {
+          mkdirSync(dirname(file), { recursive: true })
+          writeFileSync(file, readFileSync(legacy, 'utf-8'), 'utf-8')
+          console.log('[project] 已把项目历史迁移到 userData:', file)
+          // 迁移成功 → 清掉旧文件与空目录，保持单一位置
+          try {
+            rmSync(legacy, { force: true })
+            rmSync(dirname(legacy), { recursive: true, force: true })
+          } catch {
+            /* 清理旧文件失败不影响使用 */
+          }
+        } catch (err) {
+          console.error('[project] 迁移历史失败:', err)
+        }
+      }
+    }
+    if (!existsSync(file)) return { active: null, history: [] }
+    const data = JSON.parse(readFileSync(file, 'utf-8')) as Partial<ProjectState>
     return {
       active: typeof data.active === 'string' ? data.active : null,
       history: Array.isArray(data.history) ? data.history : [],

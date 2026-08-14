@@ -434,13 +434,24 @@ export interface FreeCodexApi {
   auth: {
     hasPassword: () => Promise<boolean>
     setPassword: (password: string) => Promise<{ ok: boolean }>
+    /** 读取明文连接密码（free-codex 存储，便于展示复制） */
+    getPassword: () => Promise<string | null>
     generatePassword: () => Promise<string>
   }
+  /** 欢迎向导状态：是否需要首次配置引导 */
+  onboardingStatus: () => Promise<{
+    needsOnboarding: boolean
+    steps: { ip: boolean; cloudflare: boolean; chatgpt: boolean }
+  }>
+  /** 标记欢迎向导已跳过/完成（下次启动不再强制引导） */
+  onboardingDone: () => Promise<{ ok: boolean }>
   /** 旧版原生文件夹选择器（保留兼容，UI 改用 projects.openFolder） */
   chooseProject: () => Promise<string | null>
   goHomeChat: () => Promise<void>
   /** 公网连通状态（titlebar 指示器）：查询最新检测结果 */
   tunnelStatus: () => Promise<TunnelStatus>
+  /** 右上角插件状态：点击图标即时查询最新检测结果 */
+  pluginStatus: () => Promise<PluginStatus>
   /** 订阅公网连通状态推送（主进程检测后主动下发），返回取消订阅函数 */
   onTunnelStatus: (cb: (status: TunnelStatus) => void) => () => void
   /** 订阅右上角插件状态推送（freecodex 连接器已安装与否） */

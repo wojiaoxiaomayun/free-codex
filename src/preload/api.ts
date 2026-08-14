@@ -26,8 +26,14 @@ export function exposeFreeCodexApi(): void {
     auth: {
       hasPassword: (): Promise<boolean> => ipcRenderer.invoke('auth:hasPassword'),
       setPassword: (password: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('auth:setPassword', password),
+      /** 读取明文连接密码（free-codex 存储，便于展示复制） */
+      getPassword: (): Promise<string | null> => ipcRenderer.invoke('auth:getPassword'),
       generatePassword: (): Promise<string> => ipcRenderer.invoke('auth:generatePassword'),
     },
+    /** 欢迎向导状态：是否需要首次配置引导 */
+    onboardingStatus: (): Promise<unknown> => ipcRenderer.invoke('onboarding:status'),
+    /** 标记欢迎向导已跳过/完成（下次启动不再强制引导） */
+    onboardingDone: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('onboarding:done'),
     mcp: {
       list: () => ipcRenderer.invoke('mcp:list'),
       save: (config: unknown) => ipcRenderer.invoke('mcp:save', config),
@@ -70,6 +76,8 @@ export function exposeFreeCodexApi(): void {
     goHomeChat: () => ipcRenderer.invoke('chat:goHome'),
     /** 公网连通状态（titlebar 指示器）：查询最新检测结果 */
     tunnelStatus: (): Promise<unknown> => ipcRenderer.invoke('tunnel:status'),
+    /** 右上角插件状态：点击图标即时查询最新检测结果 */
+    pluginStatus: (): Promise<unknown> => ipcRenderer.invoke('plugin:status'),
     /** 订阅公网连通状态推送（主进程检测后主动下发），返回取消订阅函数 */
     onTunnelStatus: (callback: (status: unknown) => void): (() => void) => {
       const listener = (_event: Electron.IpcRendererEvent, value: unknown) => callback(value)

@@ -21,6 +21,11 @@ import { generateAdminPassword, hasAdminPassword, setAdminPassword } from './aut
 /** 捕获到的最新 chatgpt.com Bearer token（webRequest 层，无需侵入页面） */
 let chatgptToken: string | null = null
 
+/** 是否已捕获到访问令牌（快速判断登录态，不发起网络请求） */
+export function hasChatgptToken(): boolean {
+  return !!chatgptToken
+}
+
 /** 从 session 层捕获 ChatGPT 请求的 Authorization 头（应用生命周期内常驻，幂等） */
 export function startChatgptTokenCapture(target: Session = session.defaultSession): void {
   target.webRequest.onBeforeSendHeaders((details, callback) => {
@@ -44,19 +49,27 @@ export async function chatgptApi<T = unknown>(
     accept: 'application/json',
     'content-type': 'application/json',
   }
-  const res = await net.fetch(`https://chatgpt.com${path}`, {
-    method: init.method ?? 'GET',
-    headers,
-    ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
-  })
-  const raw = await res.text()
-  let data: T = raw as T
+  // 超时兜底：net.fetch 默认无超时，网络挂住会让 titlebar 检测一直转圈
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 12_000)
   try {
-    data = JSON.parse(raw) as T
-  } catch {
-    /* 非 JSON（错误页）保留原文 */
+    const res = await net.fetch(`https://chatgpt.com${path}`, {
+      method: init.method ?? 'GET',
+      headers,
+      ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
+      signal: controller.signal,
+    })
+    const raw = await res.text()
+    let data: T = raw as T
+    try {
+      data = JSON.parse(raw) as T
+    } catch {
+      /* 非 JSON（错误页）保留原文 */
+    }
+    return { status: res.status, ok: res.ok, data, raw }
+  } finally {
+    clearTimeout(timer)
   }
-  return { status: res.status, ok: res.ok, data, raw }
 }
 
 /** 当前开发者模式状态（lockdown 模式会禁用开发者模式） */
@@ -75,10 +88,17 @@ export async function isDeveloperModeEnabled(): Promise<{ developerMode: boolean
 export async function isChatgptLoggedIn(): Promise<{ loggedIn: boolean; reason?: string }> {
   if (!chatgptToken) return { loggedIn: false, reason: 'no-token' }
   try {
-    const res = await net.fetch('https://chatgpt.com/backend-api/me', {
-      headers: { authorization: `Bearer ${chatgptToken}`, accept: 'application/json' },
-    })
-    return res.ok ? { loggedIn: true } : { loggedIn: false, reason: `http-${res.status}` }
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 12_000)
+    try {
+      const res = await net.fetch('https://chatgpt.com/backend-api/me', {
+        headers: { authorization: `Bearer ${chatgptToken}`, accept: 'application/json' },
+        signal: controller.signal,
+      })
+      return res.ok ? { loggedIn: true } : { loggedIn: false, reason: `http-${res.status}` }
+    } finally {
+      clearTimeout(timer)
+    }
   } catch (err) {
     return { loggedIn: false, reason: err instanceof Error ? err.message : String(err) }
   }
@@ -117,29 +137,39 @@ async function getCurrentUserId(): Promise<string | undefined> {
   }
 }
 
+/** 连接器目录缓存（成功或失败都缓存，避免每次检测都重试 list_accessible 的慢请求） */
+let catalogCache: { at: number; value: string | null } | null = null
+const CATALOG_CACHE_TTL_MS = 5 * 60_000
+
 export async function fetchConnectorCatalog(): Promise<string | null> {
+  if (catalogCache && Date.now() - catalogCache.at < CATALOG_CACHE_TTL_MS) {
+    return catalogCache.value
+  }
   // list_accessible 需要 body.principals（422 实测缺这个字段）。先拿用户 id 试标准格式，再回退空数组。
   const uid = await getCurrentUserId()
   const attempts: Array<{ label: string; body: Record<string, unknown> }> = [
     ...(uid ? [{ label: 'user-id', body: { principals: [{ type: 'user', id: uid }] } }] : []),
     { label: 'empty-array', body: { principals: [] } },
   ]
+  let result: string | null = null
   for (const attempt of attempts) {
     try {
       const res = await chatgptApi<{
         value?: { connectors?: Array<Record<string, unknown>> }
         connectors?: Array<Record<string, unknown>>
       }>('/backend-api/aip/connectors/list_accessible', { method: 'POST', body: attempt.body })
-      console.log(`[detect] list_accessible(${attempt.label}):`, res.status, res.raw.slice(0, 500))
+      console.log(`[detect] list_accessible(${attempt.label}):`, res.status, res.raw.slice(0, 300))
       const connectors = res.data?.value?.connectors ?? res.data?.connectors
       if (Array.isArray(connectors) && connectors.length > 0) {
-        return JSON.stringify({ connectors })
+        result = JSON.stringify({ connectors })
+        break
       }
     } catch (err) {
       console.warn(`[detect] list_accessible(${attempt.label}) 失败:`, err instanceof Error ? err.message : String(err))
     }
   }
-  return null
+  catalogCache = { at: Date.now(), value: result }
+  return result
 }
 
 /** 已安装插件条目（ps/plugins/installed） */
@@ -155,8 +185,15 @@ export type InstalledPlugin = {
   raw?: Record<string, unknown>
 }
 
+/** 已安装列表短缓存（10s，避免频繁检测重复打 ps/plugins/installed 慢请求） */
+let installedCache: { at: number; value: InstalledPlugin[] | null } | null = null
+const INSTALLED_CACHE_TTL_MS = 10_000
+
 /** 列出已安装插件 */
 export async function listInstalledPlugins(): Promise<InstalledPlugin[]> {
+  if (installedCache && Date.now() - installedCache.at < INSTALLED_CACHE_TTL_MS) {
+    return installedCache.value ?? []
+  }
   const { data } = await chatgptApi<{ plugins: Array<Record<string, unknown>> }>('/backend-api/ps/plugins/installed?limit=1000')
   const plugins = (data?.plugins ?? []).map((p) => ({
     id: String(p.id ?? ''),
@@ -166,6 +203,7 @@ export async function listInstalledPlugins(): Promise<InstalledPlugin[]> {
     installedAt: String(p.installed_at ?? p.created_at ?? ''),
     raw: p,
   }))
+  installedCache = { at: Date.now(), value: plugins }
   // 诊断：打印与 free-codex/indevs 相关的已装条目（含全部字段，便于校准匹配）
   console.log(
     '[detect] installed 总数:', plugins.length,
@@ -174,7 +212,7 @@ export async function listInstalledPlugins(): Promise<InstalledPlugin[]> {
   return plugins
 }
 
-/** oauth_config 探测结果缓存（URL → 连接器 id，60s TTL；避免轮询时反复探测） */
+/** oauth_config 探测结果缓存（URL → 连接器 id，5 分钟 TTL；避免每次检测都反复探测） */
 let oauthIdCache: { url: string; id?: string; at: number } | null = null
 
 /** 按 MCP URL / 名称 / AppId 判断插件是否已安装（canonical_app_id / 名称 / URL 字段匹配） */
@@ -183,14 +221,21 @@ export async function findPlugin(
   /** 连接器目录 JSON（system-connectors 缓存），用于 URL → 显示名/appId 映射 */
   catalogJson?: string | null,
 ): Promise<InstalledPlugin | null> {
-  const plugins = await listInstalledPlugins()
+  let plugins: InstalledPlugin[] = []
+  try {
+    plugins = await listInstalledPlugins()
+  } catch (err) {
+    // 网络超时等 → 视为未检测到（返回 null），避免未处理 rejection
+    console.warn('[detect] 获取已装插件列表失败:', err instanceof Error ? err.message : String(err))
+    return null
+  }
   const targetUrl = by.url
   const connector = targetUrl ? findConnectorByUrl(catalogJson, targetUrl) : null
 
   // 目录缺失/未命中 → 用 oauth_config 探测拿连接器 id（URL → id 的另一条可靠路径）
   if (targetUrl && !connector) {
     let id: string | undefined
-    if (oauthIdCache && oauthIdCache.url === targetUrl && Date.now() - oauthIdCache.at < 60_000) {
+    if (oauthIdCache && oauthIdCache.url === targetUrl && Date.now() - oauthIdCache.at < 5 * 60_000) {
       id = oauthIdCache.id
     } else {
       try {
@@ -359,7 +404,7 @@ async function waitForInPage(wc: WebContents, expr: string, timeoutMs: number): 
  * 密码正确则 302 重定向离开授权页（表单消失）。
  */
 async function fillOauthPassword(wc: WebContents, password: string): Promise<'ok' | 'no-form' | 'wrong-password'> {
-  const formReady = await waitForInPage(wc, `!!document.querySelector('#password')`, 15_000)
+  const formReady = await waitForInPage(wc, `!!document.querySelector('#password')`, 8_000)
   if (!formReady) return 'no-form'
   const pwd = JSON.stringify(password)
   await wc
@@ -384,7 +429,7 @@ async function fillOauthPassword(wc: WebContents, password: string): Promise<'ok
  */
 async function createConnectorViaUi(wc: WebContents, mcpUrl: string, name: string): Promise<{ ok: boolean; reason?: string }> {
   await wc.loadURL('https://chatgpt.com/plugins#settings/Connectors?create-connector=true').catch(() => undefined)
-  const formReady = await waitForInPage(wc, `!!document.querySelector('input[placeholder*="example.com"]')`, 20_000)
+  const formReady = await waitForInPage(wc, `!!document.querySelector('input[placeholder*="example.com"]')`, 8_000)
   if (!formReady) return { ok: false, reason: '添加插件表单没有加载出来' }
 
   const filled = await wc
@@ -411,7 +456,7 @@ async function createConnectorViaUi(wc: WebContents, mcpUrl: string, name: strin
   const ready = await waitForInPage(
     wc,
     `Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === '创建' && !b.disabled)`,
-    20_000,
+    8_000,
   )
   if (!ready) return { ok: false, reason: '创建按钮没有就绪（OAuth 探测未完成）' }
 
@@ -433,7 +478,7 @@ async function createConnectorViaUi(wc: WebContents, mcpUrl: string, name: strin
   if (!created?.ok) return { ok: false, reason: created?.reason ?? '点击创建失败' }
 
   // 等弹窗关闭（创建完成）
-  const closed = await waitForInPage(wc, `!document.querySelector('input[placeholder*="example.com"]')`, 20_000)
+  const closed = await waitForInPage(wc, `!document.querySelector('input[placeholder*="example.com"]')`, 8_000)
   return closed ? { ok: true } : { ok: false, reason: '创建后表单未关闭（可能有报错）' }
 }
 
@@ -451,9 +496,10 @@ export async function installMcpConnector(input: {
   // 1) 探测 OAuth 配置
   const probe = await probeMcpOAuthConfig(mcpUrl)
 
-  // 2) 尚未安装 → 驱动 ChatGPT「添加插件」表单创建连接器（实测有效；已建则跳过）
+  // 2) 尚未安装 → 显示 ChatGPT 视图并驱动「添加插件」表单创建（实测有效；已建则跳过）
   const already = await deps.pollInstalled(3000)
   if (!already && wc && !wc.isDestroyed()) {
+    deps.showView() // 让用户直接看到 ChatGPT 添加插件页
     const created = await createConnectorViaUi(wc, mcpUrl, name)
     if (!created.ok) {
       deps.showView()

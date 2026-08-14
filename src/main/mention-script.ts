@@ -33,6 +33,9 @@ export const MENTION_SCRIPT = `
     return el.isContentEditable === true || el.getAttribute('contenteditable') === 'true';
   }
 
+  // 仅在 ChatGPT 页面触发 @ /（Google 登录页、OAuth 回调等其它页面不拦截输入）
+  if (location.hostname !== 'chatgpt.com' && location.hostname !== 'chat.openai.com') return;
+
   /** 触发面板的输入元素（面板选中后插入用）与触发字符（@ 或 /） */
   window.__freehubMentionEl = null;
   window.__freehubTriggerChar = null;

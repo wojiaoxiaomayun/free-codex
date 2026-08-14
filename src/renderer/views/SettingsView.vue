@@ -65,11 +65,11 @@
           </CardContent>
         </Card>
 
-        <!-- 连接配置 -->
+        <!-- 连接配置（含连接密码） -->
         <Card class="mb-4">
           <CardHeader class="pb-3">
             <CardTitle class="text-base">连接配置</CardTitle>
-            <CardDescription>本地监听地址；公网模式通过 cloudflared 暴露给 ChatGPT。</CardDescription>
+            <CardDescription>本地监听地址与端口；公网模式通过 cloudflared 暴露给 ChatGPT，并需设置连接密码。</CardDescription>
           </CardHeader>
           <CardContent class="flex flex-col gap-3">
             <div class="grid max-w-2xl grid-cols-2 gap-3">
@@ -85,6 +85,58 @@
                   <Input id="gw-port" v-model.number="config.gateway.port" type="number" placeholder="3291" />
                 </FieldContent>
               </Field>
+            </div>
+            <!-- 连接密码（公网模式 ChatGPT 连接验证用） -->
+            <div class="flex items-center gap-2 border-t border-border/60 pt-3">
+              <Badge :variant="hasPassword ? 'default' : 'secondary'">
+                {{ hasPassword ? '已设置' : '未设置' }}
+              </Badge>
+              <span class="text-xs text-muted-foreground">连接密码（公网模式下 ChatGPT 连接验证用）</span>
+            </div>
+            <div class="flex max-w-xl items-center gap-2">
+              <div class="relative flex-1">
+                <Input
+                  v-model="passwordInput"
+                  :type="showPasswordInput ? 'text' : 'password'"
+                  placeholder="≥ 12 字符"
+                  class="pr-9"
+                  @keydown.enter="setPassword"
+                />
+                <Button
+                  v-if="passwordInput"
+                  variant="ghost"
+                  size="icon-xs"
+                  class="absolute top-1/2 right-1.5 -translate-y-1/2"
+                  :title="showPasswordInput ? '隐藏密码' : '显示密码'"
+                  @click="showPasswordInput = !showPasswordInput"
+                >
+                  <EyeOffIcon v-if="showPasswordInput" class="size-3.5" />
+                  <EyeIcon v-else class="size-3.5" />
+                </Button>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                :disabled="!passwordInput"
+                title="复制密码"
+                @click="copyPasswordInput"
+              >
+                <CopyIcon class="size-3.5" />
+                复制
+              </Button>
+              <Button variant="outline" size="sm" @click="setPassword">设置</Button>
+              <Button variant="ghost" size="sm" @click="generatePassword">生成随机密码</Button>
+            </div>
+            <p class="text-xs text-muted-foreground">
+              密码明文保存在本机（codex-mcp 侧为哈希校验），设置后这里始终可以查看/复制。
+            </p>
+            <FieldError v-if="passwordError" class="mt-1">{{ passwordError }}</FieldError>
+            <div class="mt-1 flex items-center justify-between gap-2 border-t border-border/60 pt-3">
+              <span class="text-xs text-muted-foreground">Gateway 运行中保存会自动重启生效</span>
+              <Button size="sm" @click="saveConfig">
+                <SaveIcon class="size-3.5" />
+                保存
+              </Button>
             </div>
           </CardContent>
         </Card>
@@ -375,62 +427,6 @@
           </CardContent>
         </Card>
 
-        <!-- 连接密码 -->
-        <Card class="mb-4">
-          <CardHeader class="pb-3">
-            <CardTitle class="text-base">连接密码</CardTitle>
-            <CardDescription>公网模式下 ChatGPT 连接验证密码（free-codex 管理，引擎存储）。</CardDescription>
-          </CardHeader>
-          <CardContent class="flex flex-col gap-3">
-            <div class="flex items-center gap-2">
-              <Badge :variant="hasPassword ? 'default' : 'secondary'">
-                {{ hasPassword ? '已设置' : '未设置' }}
-              </Badge>
-              <span v-if="config?.gateway.publicEnabled" class="text-xs text-muted-foreground">
-                公网模式启动前必须设置
-              </span>
-            </div>
-            <div class="flex max-w-xl items-center gap-2">
-              <div class="relative flex-1">
-                <Input
-                  v-model="passwordInput"
-                  :type="showPasswordInput ? 'text' : 'password'"
-                  placeholder="≥ 12 字符"
-                  class="pr-9"
-                  @keydown.enter="setPassword"
-                />
-                <Button
-                  v-if="passwordInput"
-                  variant="ghost"
-                  size="icon-xs"
-                  class="absolute top-1/2 right-1.5 -translate-y-1/2"
-                  :title="showPasswordInput ? '隐藏密码' : '显示密码'"
-                  @click="showPasswordInput = !showPasswordInput"
-                >
-                  <EyeOffIcon v-if="showPasswordInput" class="size-3.5" />
-                  <EyeIcon v-else class="size-3.5" />
-                </Button>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                :disabled="!passwordInput"
-                title="复制密码"
-                @click="copyPasswordInput"
-              >
-                <CopyIcon class="size-3.5" />
-                复制
-              </Button>
-              <Button variant="outline" size="sm" @click="setPassword">设置</Button>
-              <Button variant="ghost" size="sm" @click="generatePassword">生成随机密码</Button>
-            </div>
-            <p class="text-xs text-muted-foreground">
-              密码仅以哈希存储、明文不会保存，关闭本页后无法再查看；生成或设置后请在此复制保存。
-            </p>
-            <FieldError v-if="passwordError" class="mt-1">{{ passwordError }}</FieldError>
-          </CardContent>
-        </Card>
-
         <!-- ChatGPT 插件（连接器） -->
         <Card class="mb-4">
           <CardHeader class="pb-3">
@@ -563,52 +559,50 @@
             </div>
           </CardHeader>
           <CardContent>
-            <div class="flex flex-col gap-2">
-              <div
-                v-for="tool in builtinTools.slice(0, builtinToolsExpanded ? undefined : 8)"
-                :key="tool.name"
-                class="flex items-center justify-between gap-3 rounded-md border border-border/60 px-3 py-2"
-              >
-                <div class="flex min-w-0 flex-col gap-0.5">
-                  <code class="truncate text-xs text-primary">{{ tool.name }}</code>
-                  <span class="truncate text-[11px] text-muted-foreground">{{ tool.description }}</span>
-                </div>
-                <div class="flex shrink-0 items-center gap-2">
-                  <Badge variant="outline" class="text-[10px]">{{ disabledTools.includes(tool.name) ? '已禁用' : '内置' }}</Badge>
-                  <Switch
-                    :checked="!disabledTools.includes(tool.name)"
-                    :disabled="toolBusy"
-                    @update:checked="(v: boolean) => toggleTool(tool.name, v)"
-                  />
-                </div>
+            <div class="flex flex-col gap-3">
+              <div class="relative max-w-sm">
+                <SearchIcon class="absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input v-model="toolSearch" placeholder="搜索工具…" class="pl-8" />
               </div>
-              <div v-if="builtinTools.length === 0" class="py-6 text-center text-sm text-muted-foreground">
-                {{ gateway.running ? '内置工具列表获取失败，可点上方「刷新」重试' : '网关未启动，启动后可查看内置工具' }}
+              <div class="flex flex-col gap-2">
+                <div
+                  v-for="tool in filteredTools.slice(0, builtinToolsExpanded ? undefined : 8)"
+                  :key="tool.name"
+                  class="flex items-center justify-between gap-3 rounded-md border border-border/60 px-3 py-2"
+                >
+                  <div class="flex min-w-0 flex-col gap-0.5">
+                    <code class="truncate text-xs text-primary">{{ tool.name }}</code>
+                    <span class="truncate text-[11px] text-muted-foreground">{{ tool.description }}</span>
+                  </div>
+                  <div class="flex shrink-0 items-center gap-2">
+                    <Badge variant="outline" class="text-[10px]">{{ disabledTools.includes(tool.name) ? '已禁用' : '内置' }}</Badge>
+                    <Switch
+                      :checked="!disabledTools.includes(tool.name)"
+                      :disabled="toolBusy"
+                      @update:checked="(v: boolean) => toggleTool(tool.name, v)"
+                    />
+                  </div>
+                </div>
+                <div v-if="builtinTools.length === 0" class="py-6 text-center text-sm text-muted-foreground">
+                  {{ gateway.running ? '内置工具列表获取失败，可点上方「刷新」重试' : '网关未启动，启动后可查看内置工具' }}
+                </div>
+                <div v-else-if="filteredTools.length === 0" class="py-6 text-center text-sm text-muted-foreground">
+                  没有匹配「{{ toolSearch }}」的工具
+                </div>
+                <div v-if="toolBusy" class="text-center text-[11px] text-muted-foreground">保存中，网关重启后生效…</div>
+                <Button
+                  v-if="builtinTools.length > 8"
+                  variant="ghost"
+                  size="sm"
+                  class="mt-1 w-full"
+                  @click="builtinToolsExpanded = !builtinToolsExpanded"
+                >
+                  {{ builtinToolsExpanded ? '收起' : `展开全部 ${builtinTools.length} 个工具` }}
+                </Button>
               </div>
-              <div v-if="toolBusy" class="text-center text-[11px] text-muted-foreground">保存中，网关重启后生效…</div>
-              <Button
-                v-if="builtinTools.length > 8"
-                variant="ghost"
-                size="sm"
-                class="mt-1 w-full"
-                @click="builtinToolsExpanded = !builtinToolsExpanded"
-              >
-                {{ builtinToolsExpanded ? '收起' : `展开全部 ${builtinTools.length} 个工具` }}
-              </Button>
             </div>
           </CardContent>
         </Card>
-
-        <!-- 保存 -->
-        <div class="mt-5 flex items-center gap-3">
-          <Button @click="saveConfig">
-            <SaveIcon class="size-4" />
-            保存配置
-          </Button>
-          <span class="text-xs text-muted-foreground">
-            Gateway 运行中保存会自动重启生效；配置写入 {{ mcpData.path || 'userData/config.json' }}
-          </span>
-        </div>
       </template>
 
       <!-- ==================== MCP 服务器（下游） ==================== -->
@@ -808,42 +802,6 @@
         </Card>
       </template>
 
-      <!-- ==================== 配置说明 ==================== -->
-      <template v-else>
-        <div class="mb-6 flex flex-col gap-1">
-          <h1 class="text-xl font-semibold">配置说明</h1>
-          <p class="text-sm text-muted-foreground">Free Codex 使用要点。</p>
-        </div>
-        <Card>
-          <CardContent class="py-5">
-            <ol class="ml-4 flex list-decimal flex-col gap-3 text-sm text-muted-foreground">
-              <li>
-                ChatGPT 官方网页运行在独立的 Electron WebContentsView 中（高度耦合，不依赖任何 AI 平台插件）。
-              </li>
-              <li>
-                项目目录通过标题栏选择，同时是 MCP Gateway 的工作目录（
-                <code class="rounded bg-muted px-1 text-xs text-primary">projectRoot</code>）。
-              </li>
-              <li>
-                MCP Gateway 内嵌 Node.js <code class="rounded bg-muted px-1 text-xs text-primary">codex-mcp</code> 引擎；
-                Streamable HTTP、OAuth、cloudflared 公网、下游 hub 与工具全部由引擎提供。
-              </li>
-              <li>
-                全部配置（连接 / 公网 / UI 偏好 / 下游服务器）归 Free Codex 自持，存于
-                <code class="rounded bg-muted px-1 text-xs text-primary">userData/config.json</code>，
-                不再读写 ~/.codex-mcp 的配置文件；唯一例外是 OAuth 密码哈希（引擎内部存储，由设置页管理）。
-              </li>
-              <li>
-                技能来自 <code class="rounded bg-muted px-1 text-xs text-primary">~/.agents/skills</code> 与项目级
-                <code class="rounded bg-muted px-1 text-xs text-primary">.agents/skills</code>，与其他 agent 通用。
-              </li>
-              <li>
-                历史项目记录在 <code class="rounded bg-muted px-1 text-xs text-primary">~/.free-codex/projects.json</code>。
-              </li>
-            </ol>
-          </CardContent>
-        </Card>
-      </template>
     </main>
 
     <!-- 添加/编辑 MCP 服务器（Dialog 弹窗） -->
@@ -1008,7 +966,6 @@ import {
   EyeIcon,
   EyeOffIcon,
   GlobeIcon,
-  InfoIcon,
   Loader2Icon,
   PencilIcon,
   PlugIcon,
@@ -1016,6 +973,7 @@ import {
   RefreshCwIcon,
   RocketIcon,
   SaveIcon,
+  SearchIcon,
   Settings2Icon,
   ShieldAlertIcon,
   SparklesIcon,
@@ -1034,14 +992,13 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import type { FreeCodexConfig, McpListResult, McpServerEntry, SkillEntry, SkillLibraryResult, TunnelAsk, TunnelProgressEvent, TunnelSetupResult } from '../freecodex'
 
 // ---------- 子菜单导航 ----------
-type SectionId = 'gateway' | 'servers' | 'skills' | 'webview' | 'about'
+type SectionId = 'gateway' | 'servers' | 'skills' | 'webview'
 
 const navItems = [
   { id: 'gateway', label: 'MCP 网关', icon: Settings2Icon },
   { id: 'servers', label: 'MCP 服务器', icon: PlugIcon },
   { id: 'skills', label: '技能', icon: SparklesIcon },
   { id: 'webview', label: 'Webview 代理', icon: GlobeIcon },
-  { id: 'about', label: '配置说明', icon: InfoIcon },
 ] as const
 
 const router = useRouter()
@@ -1069,7 +1026,8 @@ async function saveConfig(): Promise<void> {
   const domain = config.value.gateway?.domain?.trim()
   const publicHint = domain ? `公网入口 https://${domain}/mcp` : '当前为本地模式'
   try {
-    const result = await window.freeCodex.saveConfig(config.value)
+    // Vue 的 config.value 是响应式 Proxy，不能直接过 IPC → 先转成普通对象（结构化克隆要求）
+    const result = await window.freeCodex.saveConfig(JSON.parse(JSON.stringify(config.value)))
     // 主进程可能自动生成了 cloudflared.yml 等 → 重载配置让字段显示真实值
     config.value = await window.freeCodex.getConfig()
     if (result.restartError) {
@@ -1157,6 +1115,15 @@ async function applyProxy(): Promise<void> {
 const gateway = ref({ endpoint: 'http://127.0.0.1:3291/mcp', publicUrl: '', running: false })
 const builtinTools = ref<{ name: string; description: string }[]>([])
 const builtinToolsExpanded = ref(false)
+/** 工具搜索关键词（按名称/描述过滤） */
+const toolSearch = ref('')
+const filteredTools = computed(() => {
+  const q = toolSearch.value.trim().toLowerCase()
+  if (!q) return builtinTools.value
+  return builtinTools.value.filter(
+    (t) => t.name.toLowerCase().includes(q) || (t.description || '').toLowerCase().includes(q),
+  )
+})
 /** 禁用的内置工具短名（config.toolEnablement.disabledTools） */
 const disabledTools = ref<string[]>([])
 const toolBusy = ref(false)
@@ -1449,6 +1416,9 @@ const showPasswordInput = ref(false)
 
 async function refreshAuth(): Promise<void> {
   hasPassword.value = await window.freeCodex.auth.hasPassword()
+  // 明文由 free-codex 本地保存，读出来展示/复制（codex-mcp 侧仍是哈希校验）
+  const plain = await window.freeCodex.auth.getPassword()
+  if (plain) passwordInput.value = plain
 }
 
 /** 复制输入框中的连接密码到剪贴板（Electron file:// 下 clipboard API 不可用时回退 execCommand） */
@@ -1904,7 +1874,7 @@ function shortAppId(id?: string): string {
   return id && id.length > 20 ? `${id.slice(0, 20)}…` : (id ?? '')
 }
 
-/** 插件状态定时轮询（20s 静默刷新，保持设置页显示与 ChatGPT 实际状态同步） */
+/** 插件状态定时轮询（10 分钟静默刷新；点「检测」随时手动查） */
 let pluginTimer: ReturnType<typeof setInterval> | undefined
 
 onMounted(async () => {
@@ -1921,7 +1891,7 @@ onMounted(async () => {
     void refreshPlugin()
   }
   if (!pluginTimer) {
-    pluginTimer = setInterval(() => void silentRefreshPlugin(), 20_000)
+    pluginTimer = setInterval(() => void silentRefreshPlugin(), 600_000)
   }
 })
 

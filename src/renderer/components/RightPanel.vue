@@ -816,7 +816,7 @@ async function deleteAllConvs(): Promise<void> {
   }
 }
 
-/** 多选删除：逐条真实删除选中的对话（带 loading） */
+/** 多选删除：先逐条真实删除选中的对话，全部删完再统一刷新一次列表（不边删边刷） */
 async function deleteSelected(): Promise<void> {
   const ids = [...selectedIds.value]
   if (!ids.length) return
@@ -832,15 +832,13 @@ async function deleteSelected(): Promise<void> {
       const r = await window.freeCodex.chatgpt.deleteConversation(id)
       deleting.delete(id)
       deletingIds.value = new Set(deleting)
-      if (r.ok) {
-        ok++
-        conversations.value = conversations.value.filter((x) => x.id !== id)
-        selectedIds.value = new Set([...selectedIds.value].filter((x) => x !== id))
-      } else {
-        failed++
-      }
+      if (r.ok) ok++
+      else failed++
     }
+    selectedIds.value = new Set()
     log(`已删除选中 ${ok} 个对话${failed ? `，失败 ${failed} 个` : ''}`)
+    // 全部删完后再刷新一次列表
+    await loadConversations()
   } finally {
     listBusy.value = false
   }

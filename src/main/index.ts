@@ -16,6 +16,7 @@ import { listProjectFiles } from './project-files'
 import { listDiffRecords, revertFile, confirmFile, undoHunk } from './file-diffs'
 import {
   startChatgptTokenCapture,
+  hasChatgptToken,
   isChatgptLoggedIn,
   ensureDeveloperMode,
   isDeveloperModeEnabled,
@@ -87,6 +88,8 @@ type PluginStatus = {
 }
 /** 公网状态轮询定时器（30s 一次；网关/隧道事件也会触发即时推送） */
 let tunnelStatusTimer: NodeJS.Timeout | undefined
+/** 右上角插件状态轮询定时器（60s 一次；安装/登录后也会触发即时推送） */
+let pluginStatusTimer: NodeJS.Timeout | undefined
 /** 公网检测进行中（并发去重，复用 TunnelManager.ensure 的 busy 模式） */
 let tunnelStatusCheck: Promise<TunnelStatus> | null = null
 
@@ -157,20 +160,25 @@ async function pollPluginInstalled(url: string, timeoutMs: number): Promise<bool
 
 /** 主动检测一次 freecodex 插件显示名（启动后页面/目录缓存就绪时调用），供注入使用 */
 async function refreshDetectedPluginName(): Promise<void> {
-  const domain = config?.gateway?.domain
-  if (!domain) return
-  const url = `https://${domain}/mcp`
-  const catalogJson = await readConnectorCatalog()
-  const result = await findPlugin({ url }, catalogJson)
-  if (result?.displayName && result.displayName !== detectedPluginName) {
-    detectedPluginName = result.displayName
-    console.log('[inject] 检测到插件显示名:', detectedPluginName)
-    void syncChatInjection()
-  }
-  if (result?.canonicalAppId && result.canonicalAppId !== detectedPluginAppId) {
-    detectedPluginAppId = result.canonicalAppId
-    console.log('[inject] 检测到插件 appId:', detectedPluginAppId)
-    void syncPluginMentionGlobals()
+  try {
+    const domain = config?.gateway?.domain
+    if (!domain) return
+    const url = `https://${domain}/mcp`
+    const catalogJson = await readConnectorCatalog()
+    const result = await findPlugin({ url }, catalogJson)
+    if (result?.displayName && result.displayName !== detectedPluginName) {
+      detectedPluginName = result.displayName
+      console.log('[inject] 检测到插件显示名:', detectedPluginName)
+      void syncChatInjection()
+    }
+    if (result?.canonicalAppId && result.canonicalAppId !== detectedPluginAppId) {
+      detectedPluginAppId = result.canonicalAppId
+      console.log('[inject] 检测到插件 appId:', detectedPluginAppId)
+      void syncPluginMentionGlobals()
+    }
+  } catch (err) {
+    // 网络超时等失败不应产生未处理 rejection
+    console.warn('[inject] 检测插件显示名失败:', err instanceof Error ? err.message : String(err))
   }
 }
 
@@ -268,6 +276,8 @@ function syncOverlayBounds() {
   if (!win || win.isDestroyed() || !overlayWin || overlayWin.isDestroyed()) return
   // overlay 是独立窗口，坐标用屏幕绝对坐标（getContentBounds 返回值即屏幕坐标）
   const b = win.getContentBounds()
+  // 拖动/窗口过渡中 getContentBounds 可能短暂返回空边界 → 跳过，避免透明 overlay 跳到 (0,0) 闪烁
+  if (!b || b.width <= 0 || b.height <= 0) return
   overlayWin.setBounds({ x: b.x, y: b.y, width: b.width, height: b.height })
 }
 
@@ -457,7 +467,14 @@ async function createWindow() {
     title: 'Free Codex',
     frame: false,
     backgroundColor: '#ffffff',
-    webPreferences: { preload: path.join(__dirname, '../preload/index.js'), contextIsolation: true, nodeIntegration: false }
+    // backgroundThrottling:false：无边框窗口拖动标题栏时渲染进程被节流暂停，
+    // 内容来不及重绘会露出白底闪烁（Windows 经典问题）
+    webPreferences: {
+      preload: path.join(__dirname, '../preload/index.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      backgroundThrottling: false,
+    },
   } as BrowserWindowConstructorOptions)
 
   win.on('ready-to-show', () => {
@@ -483,6 +500,9 @@ async function createWindow() {
   // 窗口销毁后置空引用：后台定时器/异步任务不会再对已销毁的 webContents 发消息
   win.on('closed', () => {
     win = undefined
+    // overlay 是独立 BrowserWindow（置顶、skipTaskbar、无 parent），主窗口关了它还开着，
+    // 会卡住 window-all-closed → app.quit() 不被触发 → 进程残留任务管理器。这里一并销毁。
+    overlayWin?.destroy()
   })
   registerCtrlR(win.webContents)
   registerDevToolsShortcut(win.webContents)
@@ -492,6 +512,8 @@ async function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      // 拖动窗口时保持重绘，避免原生视图闪白（与主窗口 backgroundThrottling:false 同理）
+      backgroundThrottling: false,
       // ChatGPT 页面专用 preload：注入 @ / 触发检测脚本 + postMessage 桥
       preload: path.join(__dirname, '../preload/chat-preload.js'),
     },
@@ -512,6 +534,16 @@ async function createWindow() {
     setTimeout(() => { void applyChatTheme(currentThemeDark) }, 4000)
     // 页面加载后注入 fetch hook（项目路径注入依赖），失败自动重试
     void installChatFetchHook()
+    // ChatGPT 页面加载完成 → token 即将被捕获 → 延迟几秒再检测右上角插件状态
+    // （启动时 token 还没到手，探测不准/转圈；以页面就绪为时机更合理）
+    try {
+      const host = new URL(chatView!.webContents.getURL()).hostname
+      if (host === 'chatgpt.com' || host === 'chat.openai.com') {
+        setTimeout(() => void pushPluginStatus(), 3000)
+      }
+    } catch {
+      /* URL 解析失败忽略 */
+    }
   })
   registerCtrlR(chatView.webContents)
   registerDevToolsShortcut(chatView.webContents)
@@ -522,7 +554,9 @@ async function createWindow() {
   startConversationPolling()
 
   // overlay 是独立窗口，需要全量同步主窗口的位置/尺寸/显隐状态
-  win.on('move', syncOverlayBounds)
+  // 拖动标题栏时透明 overlay 若每帧跟随 setBounds 会闪烁（Windows 透明窗口高速 reposition 的固有问题），
+  // 所以拖动过程中不追（move），拖动结束（moved）再对齐一次。
+  win.on('moved', syncOverlayBounds)
   win.on('resize', syncOverlayBounds)
   win.on('maximize', syncOverlayBounds)
   win.on('unmaximize', syncOverlayBounds)
@@ -759,6 +793,20 @@ function sendToWin(channel: string, ...args: unknown[]): void {
   }
 }
 
+/**
+ * 原生对话框（文件夹选择等）会显示在 alwaysOnTop 的 overlay 之下 → 被挡住。
+ * 在弹对话框前临时隐藏 overlay，结束后按当前模式恢复。
+ */
+async function withOverlayHidden<T>(fn: () => Promise<T>): Promise<T> {
+  const wasVisible = !!overlayWin && !overlayWin.isDestroyed() && overlayWin.isVisible()
+  if (wasVisible) overlayWin?.hide()
+  try {
+    return await fn()
+  } finally {
+    if (wasVisible && overlayMode !== 'none') applyOverlayMode()
+  }
+}
+
 /** 检测并推送公网状态到渲染层（titlebar 指示器），返回最新状态 */
 async function pushTunnelStatus(): Promise<TunnelStatus> {
   const status = await checkTunnelStatus()
@@ -771,14 +819,11 @@ async function checkPluginStatus(): Promise<PluginStatus> {
   const base = { checkedAt: Date.now() }
   const domain = config?.gateway?.domain?.trim()
   if (!domain) return { ...base, state: 'no-domain' }
-  try {
-    const login = await isChatgptLoggedIn()
-    if (!login.loggedIn) return { ...base, state: 'no-login' }
-  } catch {
-    return { ...base, state: 'no-login' }
-  }
+  // 没有捕获到 token → 未登录（快速返回，不发起网络请求）
+  if (!hasChatgptToken()) return { ...base, state: 'no-login' }
   const url = `https://${domain}/mcp`
   try {
+    // 与设置页一致：用连接器目录（已缓存 5 分钟）+ findPlugin 匹配
     const catalogJson = await readConnectorCatalog()
     const plugin = await findPlugin({ url }, catalogJson)
     if (plugin) {
@@ -948,13 +993,14 @@ app.whenReady().then(async () => {
   // cloudflared 作为 app 层能力：独立于网关生命周期常驻，公网不可达时才拉起（见 tunnel-manager.ts）。
   // 配置公网就绪才创建；之后向导/保存配置也会重新同步（syncTunnelManager），无需重启应用。
   await syncTunnelManager()
-  // 公网连通状态轮询（titlebar 指示器；网关启停/隧道 ensure 也会触发即时推送）+ 右上角插件状态
+  // 公网连通状态轮询（titlebar 指示器；10 分钟一次，点击图标/网关事件即时推送）
   tunnelStatusTimer = setInterval(() => {
     void pushTunnelStatus()
+  }, 600_000)
+  // 右上角插件状态独立轮询（10 分钟一次；ChatGPT 页面加载完/点击图标/安装登录后即时推送）
+  pluginStatusTimer = setInterval(() => {
     void pushPluginStatus()
-  }, 30_000)
-  // 启动后立即推一次右上角插件状态（未登录/未配置域名时指示器会如实显示）
-  void pushPluginStatus()
+  }, 600_000)
   skills = new SkillManager(() => config.projectRoot || null)
   gateway.onEvent((event) => sendToWin('mcp:event', event))
   // 工具调用（发起/完成）→ 记录会话归属 + 推送渲染层实时更新
@@ -1078,6 +1124,8 @@ app.whenReady().then(async () => {
   }))
   // 公网连通状态（titlebar 指示器）：返回最新检测结果并触发即时推送
   ipcMain.handle('tunnel:status', () => pushTunnelStatus())
+  // 右上角插件状态：点击图标即时查询（轮询 10 分钟一次，手动点击不受限）
+  ipcMain.handle('plugin:status', () => pushPluginStatus())
   // 工具调用快照（按 MCP 会话分组 + 会话归属对话），Tools 面板按当前会话过滤展示
   ipcMain.handle('tools:calls', () => {
     const { sessions, recent } = gateway.getToolCalls()
@@ -1127,14 +1175,16 @@ app.whenReady().then(async () => {
   })
   ipcMain.handle('cloudflare:pickBin', async () => {
     if (!win) return { ok: false, error: '窗口不可用' }
-    const result = await dialog.showOpenDialog(win, {
-      title: '选择 cloudflared 可执行文件',
-      properties: ['openFile'],
-      filters: [
-        { name: '可执行文件', extensions: ['exe'] },
-        { name: '所有文件', extensions: ['*'] },
-      ],
-    })
+    const result = await withOverlayHidden(() =>
+      dialog.showOpenDialog(win!, {
+        title: '选择 cloudflared 可执行文件',
+        properties: ['openFile'],
+        filters: [
+          { name: '可执行文件', extensions: ['exe'] },
+          { name: '所有文件', extensions: ['*'] },
+        ],
+      }),
+    )
     if (result.canceled || !result.filePaths[0]) return { ok: false, canceled: true }
     return { ok: true, path: result.filePaths[0] }
   })
@@ -1423,14 +1473,45 @@ app.whenReady().then(async () => {
   ipcMain.handle('auth:hasPassword', () => hasAdminPassword())
   ipcMain.handle('auth:setPassword', async (_e, password: string) => {
     await setAdminPassword(password)
+    // 明文一并存入 free-codex 配置（欢迎向导/设置页可展示复制；codex-mcp 侧仍是哈希校验）
+    config.connectionPassword = password
+    saveConfig(config)
     return { ok: true }
   })
+  ipcMain.handle('auth:getPassword', () => config.connectionPassword ?? null)
   ipcMain.handle('auth:generatePassword', async () => generateAdminPassword())
+
+  // ---------- 欢迎向导（首次配置引导）----------
+  ipcMain.handle('onboarding:status', () => {
+    const publicReady = !!config.gateway.domain && !!config.gateway.tunnelId
+    // 本地已有可用的 codex-mcp 公网配置 → 直接跳过欢迎向导
+    let codexConfigured = false
+    try {
+      const raw = JSON.parse(readFileSync(path.join(app.getPath('home'), '.codex-mcp', 'config.json'), 'utf8')) as { domain?: string; tunnelId?: string }
+      codexConfigured = !!raw?.domain && !!raw?.tunnelId
+    } catch {
+      /* 读不到视为未配置 */
+    }
+    return {
+      needsOnboarding: !config.onboardingSkipped && !publicReady && !codexConfigured,
+      steps: {
+        ip: !config.connectionPassword || !config.gateway.host || !config.gateway.port,
+        cloudflare: !publicReady,
+        chatgpt: true,
+      },
+    }
+  })
+  ipcMain.handle('onboarding:done', () => {
+    config.onboardingSkipped = true
+    saveConfig(config)
+    return { ok: true }
+  })
 
   // ---------- 项目（Project）----------
   ipcMain.handle('project:get', () => projects.getState())
   ipcMain.handle('project:openFolder', async () => {
-    const result = await projects.openFolder()
+    // 原生对话框会被 alwaysOnTop overlay 挡住 → 弹窗前隐藏
+    const result = await withOverlayHidden(() => projects.openFolder())
     if (result.ok) {
       sendToWin('project:changed', result.state)
       void syncChatInjection()
@@ -1452,9 +1533,13 @@ app.whenReady().then(async () => {
   // 旧版原生文件夹选择器（保留兼容，UI 改用 projects.openFolder）
   ipcMain.handle('project:choose', async () => {
     if (!win) return null
-    const result = await dialog.showOpenDialog(win, { title: '选择项目', properties: ['openDirectory', 'createDirectory'] })
+    const result = await withOverlayHidden(() =>
+      dialog.showOpenDialog(win!, { title: '选择项目', properties: ['openDirectory', 'createDirectory'] }),
+    )
     if (result.canceled || !result.filePaths[0]) return config.projectRoot || null
     const r = await projects.activate(result.filePaths[0])
+    // 通知渲染层刷新 titlebar 项目显示（欢迎向导选完项目立即生效）
+    if (r.ok && r.state) sendToWin('project:changed', r.state)
     void syncChatInjection()
     return r.state?.active ?? (config.projectRoot || null)
   })
@@ -1532,6 +1617,12 @@ app.whenReady().then(async () => {
 // ------------------------------------------------------------
 let shuttingDown = false
 
+/** 退出清理时常见的无害错误（进程已自行退出，taskkill 找不到）→ 不当作错误打日志 */
+function isBenignQuitError(err: unknown): boolean {
+  const m = err instanceof Error ? err.message : String(err)
+  return /没有找到进程|找不到进程|not found|not running|already exited|进程已退出/i.test(m)
+}
+
 async function shutdownBackground(): Promise<void> {
   if (shuttingDown) return
   shuttingDown = true
@@ -1539,6 +1630,10 @@ async function shutdownBackground(): Promise<void> {
   if (tunnelStatusTimer) {
     clearInterval(tunnelStatusTimer)
     tunnelStatusTimer = undefined
+  }
+  if (pluginStatusTimer) {
+    clearInterval(pluginStatusTimer)
+    pluginStatusTimer = undefined
   }
   if (convPollTimer) {
     clearInterval(convPollTimer)
@@ -1548,18 +1643,33 @@ async function shutdownBackground(): Promise<void> {
   tunnelCoordinator?.cancel()
   const jobs: Promise<unknown>[] = []
   // gateway.stop() → server.close() → hub.close() → 下游 stdio MCP 子进程会被终止
-  if (gateway) jobs.push(gateway.stop().catch((err) => console.warn('[quit] 网关停止失败:', err instanceof Error ? err.message : err)))
-  if (todosServer) jobs.push(todosServer.stop().catch((err) => console.warn('[quit] todos 停止失败:', err instanceof Error ? err.message : err)))
+  if (gateway) jobs.push(gateway.stop().catch((err) => logQuitError('网关', err)))
+  if (todosServer) jobs.push(todosServer.stop().catch((err) => logQuitError('todos', err)))
   // tunnelManager.stop() → CloudflaredSidecar.stop() → taskkill 整棵进程树
-  if (tunnelManager) jobs.push(tunnelManager.stop().catch((err) => console.warn('[quit] 隧道停止失败:', err instanceof Error ? err.message : err)))
+  if (tunnelManager) jobs.push(tunnelManager.stop().catch((err) => logQuitError('隧道', err)))
   overlayWin?.destroy()
   // 最多等 5 秒：个别下游不响应也不能卡住退出
   await Promise.race([Promise.all(jobs), new Promise((resolve) => setTimeout(resolve, 5000))])
 }
 
+function logQuitError(name: string, err: unknown): void {
+  if (isBenignQuitError(err)) {
+    console.log(`[quit] ${name}已停止（进程已退出，无需清理）`)
+    return
+  }
+  console.warn(`[quit] ${name}停止失败:`, err instanceof Error ? err.message : err)
+}
+
 app.on('before-quit', (event) => {
   // 先停干净再退出（app.exit 不再触发 before-quit，不会死循环）
   event.preventDefault()
-  void shutdownBackground().then(() => app.exit(0))
+  // 先停干净再退出（app.exit 不再触发 before-quit，不会死循环）；
+  // 清理过程异常也要保证退出，否则进程会残留在任务管理器
+  void shutdownBackground()
+    .then(() => app.exit(0))
+    .catch((err) => {
+      console.error('[quit] 后台清理异常，强制退出:', err instanceof Error ? err.message : String(err))
+      app.exit(1)
+    })
 })
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })

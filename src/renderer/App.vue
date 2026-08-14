@@ -9,22 +9,23 @@
         <router-view />
       </main>
 
-      <!-- 右侧工具面板仅在 AI 应用页面显示（设置页展示工具调用记录无意义） -->
-      <RightPanel v-if="!isSettings" />
+      <!-- 右侧工具面板仅在 AI 应用页面显示（设置/欢迎页展示工具调用记录无意义） -->
+      <RightPanel v-if="!isAppPage" />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import TitleBar from './components/TitleBar.vue'
 import RightPanel from './components/RightPanel.vue'
 
 const route = useRoute()
+const router = useRouter()
 
-/** 是否为应用页面（设置页隐藏右侧工具面板） */
-const isSettings = computed(() => route.name === 'settings')
+/** 应用内页面（隐藏右侧工具面板；欢迎/设置页展示工具记录无意义） */
+const isAppPage = computed(() => route.name === 'settings' || route.name === 'welcome')
 
 // WebContentsView 是原生层，CSS z-index 无法让 renderer UI 覆盖它。
 // 因此 ChatGPT 视图的显示/隐藏只由路由决定：应用页隐藏，首页恢复。
@@ -40,6 +41,18 @@ watch(
   },
   { immediate: true },
 )
+
+// 首次启动且未配置（也没有可用的 codex-mcp 配置）→ 进入欢迎向导
+onMounted(async () => {
+  try {
+    const s = await window.freeCodex.onboardingStatus()
+    if (s.needsOnboarding && route.name !== 'welcome') {
+      await router.replace('/welcome')
+    }
+  } catch {
+    /* 状态读取失败不阻塞启动 */
+  }
+})
 </script>
 
 <style>

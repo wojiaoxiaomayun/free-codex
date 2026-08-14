@@ -39,12 +39,12 @@
         <WifiOffIcon v-else class="size-4 text-muted-foreground" />
       </button>
 
-      <!-- 插件状态（freecodex 连接器；点击回到设置页插件区） -->
+      <!-- 插件状态（freecodex 连接器；点击即时重新检测） -->
       <button
         class="flex h-9 w-10 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
         aria-label="插件状态"
         :title="pluginTitle"
-        @click="openSettings"
+        @click="refreshPluginStatus"
       >
         <Loader2Icon v-if="pluginState === 'checking'" class="size-4 animate-spin text-yellow-500" />
         <PlugZapIcon v-else-if="pluginState === 'installed'" class="size-4 text-emerald-500" />
@@ -143,10 +143,10 @@ const activeProjectName = computed(() => {
 })
 
 // ---------- 设置 ----------
-/** 打开设置：先隐藏 ChatGPT 视图（避免被 WebContentsView 覆盖） */
+/** 打开设置：先切路由再隐藏 ChatGPT 视图，避免中间露出被盖住的首页内容（闪现） */
 async function openSettings(): Promise<void> {
-  await window.freeCodex.hideViews()
   router.push('/settings')
+  await window.freeCodex.hideViews().catch(() => undefined)
 }
 
 /** 回到 ChatGPT 首页（加载起始 URL，避免刷新只重载当前链接） */
@@ -198,6 +198,16 @@ const pluginTitle = computed(() => {
       return '插件: 检测中…'
   }
 })
+
+/** 点击插件图标 → 即时重新检测（先转圈给反馈，避免"点了没反应"的错觉） */
+async function refreshPluginStatus(): Promise<void> {
+  pluginStatus.value = { state: 'checking', checkedAt: Date.now() }
+  try {
+    pluginStatus.value = await window.freeCodex.pluginStatus()
+  } catch {
+    pluginStatus.value = { state: 'checking', checkedAt: Date.now() }
+  }
+}
 
 // ---------- 主题切换 ----------
 const isDark = ref(document.documentElement.classList.contains('dark'))
