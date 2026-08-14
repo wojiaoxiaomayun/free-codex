@@ -23,16 +23,30 @@
     <!-- 中间：可拖拽区域（占满） -->
     <div class="flex-1"></div>
 
-    <!-- 右侧：刷新 ChatGPT + 设置 + 主题切换 + 窗口控制按钮 -->
+    <!-- 右侧：公网状态 + 回到首页 + 设置 + 主题切换 + 窗口控制按钮 -->
     <div class="titlebar-no-drag flex items-center">
-      <!-- 刷新 ChatGPT（Free Codex 特有：WebContentsView 直接 reload） -->
+      <!-- 公网连通状态（点击重新检测） -->
       <button
         class="flex h-9 w-10 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-        aria-label="刷新 ChatGPT"
-        title="刷新 ChatGPT"
-        @click="reloadChat"
+        aria-label="公网连通状态"
+        :title="tunnelTitle"
+        @click="refreshTunnelStatus"
       >
-        <RefreshCwIcon class="size-4" />
+        <Loader2Icon v-if="tunnelState === 'checking'" class="size-4 animate-spin text-yellow-500" />
+        <WifiIcon v-else-if="tunnelState === 'online'" class="size-4 text-emerald-500" />
+        <WifiOffIcon v-else-if="tunnelState === 'offline'" class="size-4 text-red-500" />
+        <WifiIcon v-else-if="tunnelState === 'local'" class="size-4 text-muted-foreground" />
+        <WifiOffIcon v-else class="size-4 text-muted-foreground" />
+      </button>
+
+      <!-- 回到 ChatGPT 首页（Free Codex 特有：WebContentsView 加载起始 URL） -->
+      <button
+        class="flex h-9 w-10 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+        aria-label="回到 ChatGPT 首页"
+        title="回到 ChatGPT 首页"
+        @click="goHomeChat"
+      >
+        <HomeIcon class="size-4" />
       </button>
 
       <!-- 设置 -->
@@ -86,15 +100,18 @@ import { toast } from '@/lib/toast-bridge'
 import {
   CopyIcon,
   FolderOpenIcon,
+  HomeIcon,
+  Loader2Icon,
   MinusIcon,
   MoonIcon,
-  RefreshCwIcon,
   SettingsIcon,
   SquareIcon,
   SunIcon,
+  WifiIcon,
+  WifiOffIcon,
   XIcon,
 } from 'lucide-vue-next'
-import type { FreeCodexWindowControls, ProjectState } from '../freecodex'
+import type { FreeCodexWindowControls, ProjectState, TunnelStatus } from '../freecodex'
 
 const windowControls: FreeCodexWindowControls = window.freeCodex.windowControls
 const router = useRouter()
@@ -118,9 +135,31 @@ async function openSettings(): Promise<void> {
   router.push('/settings')
 }
 
-/** 刷新 ChatGPT 网页 */
-async function reloadChat(): Promise<void> {
-  await window.freeCodex.reloadChat()
+/** 回到 ChatGPT 首页（加载起始 URL，避免刷新只重载当前链接） */
+async function goHomeChat(): Promise<void> {
+  await window.freeCodex.goHomeChat()
+}
+
+// ---------- 公网连通状态（右上角指示器）----------
+const tunnelStatus = ref<TunnelStatus>({
+  state: 'checking',
+  publicUrl: '',
+  checkedAt: 0,
+  detail: '检测中…',
+})
+let unsubscribeTunnelStatus: (() => void) | undefined
+
+const tunnelState = computed(() => tunnelStatus.value.state)
+
+/** 悬浮提示：状态详情 + 公网地址 */
+const tunnelTitle = computed(() => {
+  const s = tunnelStatus.value
+  return s.publicUrl ? `${s.detail}\n公网地址: ${s.publicUrl}` : s.detail
+})
+
+/** 手动触发重新检测 */
+async function refreshTunnelStatus(): Promise<void> {
+  tunnelStatus.value = await window.freeCodex.tunnelStatus()
 }
 
 // ---------- 主题切换 ----------
@@ -166,6 +205,11 @@ onMounted(async () => {
   unsubscribeProjectChanged = window.freeCodex.onProjectChanged((state) => {
     activeProject.value = state as ProjectState
   })
+  // 公网连通状态：订阅主进程推送 + 启动时立即检测一次
+  unsubscribeTunnelStatus = window.freeCodex.onTunnelStatus((status) => {
+    tunnelStatus.value = status as TunnelStatus
+  })
+  void refreshTunnelStatus()
   // 启动时应用当前主题到 ChatGPT 页面（ChatGPT 视图可能已打开）
   window.freeCodex.setTheme(isDark.value).catch(() => undefined)
 })
@@ -173,6 +217,7 @@ onMounted(async () => {
 onUnmounted(() => {
   unsubscribe?.()
   unsubscribeProjectChanged?.()
+  unsubscribeTunnelStatus?.()
 })
 </script>
 

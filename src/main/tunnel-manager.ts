@@ -73,6 +73,17 @@ export class TunnelManager {
     }
   }
 
+  /**
+   * 只读可达性检测：用网关探针验证公网可达，不拉起/不重启隧道。
+   * 返回 true=可达, false=不可达, null=无探针（网关未运行，无法校验）。
+   */
+  async checkReachable(): Promise<boolean | null> {
+    const probe = this.opts.getProbe()
+    if (!probe) return null
+    const modules = (this.modules ??= await loadTunnelModules())
+    return this.tryVerify(modules, `https://${this.opts.domain}/mcp`, probe)
+  }
+
   private async runEnsure(): Promise<{ ok: boolean; message: string }> {
     const modules = (this.modules ??= await loadTunnelModules())
     const probe = this.opts.getProbe()

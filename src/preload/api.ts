@@ -63,7 +63,15 @@ export function exposeFreeCodexApi(): void {
     maximize: () => ipcRenderer.invoke('window:maximize'),
     close: () => ipcRenderer.invoke('window:close'),
     setPanelCollapsed: (collapsed: boolean) => ipcRenderer.invoke('panel:setCollapsed', collapsed),
-    reloadChat: () => ipcRenderer.invoke('chat:reload'),
+    goHomeChat: () => ipcRenderer.invoke('chat:goHome'),
+    /** 公网连通状态（titlebar 指示器）：查询最新检测结果 */
+    tunnelStatus: (): Promise<unknown> => ipcRenderer.invoke('tunnel:status'),
+    /** 订阅公网连通状态推送（主进程检测后主动下发），返回取消订阅函数 */
+    onTunnelStatus: (callback: (status: unknown) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, value: unknown) => callback(value)
+      ipcRenderer.on('tunnel:status', listener)
+      return () => ipcRenderer.removeListener('tunnel:status', listener)
+    },
     onMcpEvent: (callback: (event: unknown) => void) => {
       const listener = (_event: Electron.IpcRendererEvent, value: unknown) => callback(value)
       ipcRenderer.on('mcp:event', listener)

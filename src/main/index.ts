@@ -64,6 +64,17 @@ let viewVisible = true
 let hiddenForOverlay = false
 /** 当前主题（同步到 ChatGPT 页面）；默认白色 */
 let currentThemeDark = false
+/** 公网连通状态（titlebar 指示器）：checking=检测中 online=公网可达 offline=不可达 local=本地模式 gateway_stopped=网关未运行 */
+type TunnelStatus = {
+  state: 'checking' | 'online' | 'offline' | 'local' | 'gateway_stopped'
+  publicUrl: string
+  checkedAt: number
+  detail: string
+}
+/** 公网状态轮询定时器（30s 一次；网关/隧道事件也会触发即时推送） */
+let tunnelStatusTimer: NodeJS.Timeout | undefined
+/** 公网检测进行中（并发去重，复用 TunnelManager.ensure 的 busy 模式） */
+let tunnelStatusCheck: Promise<TunnelStatus> | null = null
 
 // ------------------------------------------------------------
 // 当前对话识别（CDP 求值 ChatGPT 页面：URL /c/{id} + fetch hook 记录的会话 ID）
@@ -604,6 +615,54 @@ async function ensureTunnel(): Promise<void> {
   } catch (err) {
     console.error('[tunnel] 隧道检查异常:', err instanceof Error ? err.message : String(err))
   }
+  void pushTunnelStatus() // ensure 后推送最新公网状态（titlebar 指示器）
+}
+
+/**
+ * 计算公网连通状态（只读，不拉起/重启隧道）：
+ * - 网关未运行 → gateway_stopped
+ * - 运行中但未启用公网 → local
+ * - 公网模式 → 用网关探针校验可达性 → online / offline
+ */
+async function doCheckTunnelStatus(): Promise<TunnelStatus> {
+  const base = { checkedAt: Date.now() }
+  if (!gateway.running) {
+    return { ...base, state: 'gateway_stopped', publicUrl: '', detail: '网关未运行' }
+  }
+  const publicUrl = gateway.publicUrl
+  if (!publicUrl) {
+    return { ...base, state: 'local', publicUrl: '', detail: '本地模式（未启用公网）' }
+  }
+  try {
+    const reachable = (await tunnelManager?.checkReachable()) ?? null
+    if (reachable === null) {
+      return { ...base, state: 'checking', publicUrl, detail: '探针未就绪，正在检测…' }
+    }
+    return {
+      ...base,
+      state: reachable ? 'online' : 'offline',
+      publicUrl,
+      detail: reachable ? '公网正常（隧道可达）' : '公网不可达（隧道未就绪）',
+    }
+  } catch (err) {
+    return { ...base, state: 'offline', publicUrl, detail: `检测异常: ${err instanceof Error ? err.message : String(err)}` }
+  }
+}
+
+/** 公网连通检测（并发去重，避免轮询与手动检测重叠） */
+function checkTunnelStatus(): Promise<TunnelStatus> {
+  if (tunnelStatusCheck) return tunnelStatusCheck
+  tunnelStatusCheck = doCheckTunnelStatus().finally(() => {
+    tunnelStatusCheck = null
+  })
+  return tunnelStatusCheck
+}
+
+/** 检测并推送公网状态到渲染层（titlebar 指示器），返回最新状态 */
+async function pushTunnelStatus(): Promise<TunnelStatus> {
+  const status = await checkTunnelStatus()
+  win?.webContents.send('tunnel:status', status)
+  return status
 }
 
 /** 把文本插入 ChatGPT 页面输入框（面板选中后调用，替换触发的 @ /） */
@@ -737,6 +796,8 @@ app.whenReady().then(() => {
       getProbe: () => gateway.getTunnelProbe(),
     })
   }
+  // 公网连通状态轮询（titlebar 指示器；网关启停/隧道 ensure 也会触发即时推送）
+  tunnelStatusTimer = setInterval(() => void pushTunnelStatus(), 30_000)
   skills = new SkillManager(() => config.projectRoot || null)
   gateway.onEvent((event) => win?.webContents.send('mcp:event', event))
   // 工具调用（发起/完成）→ 记录会话归属 + 推送渲染层实时更新
@@ -824,9 +885,14 @@ app.whenReady().then(() => {
     config.gateway.projectRoot = config.projectRoot
     const url = await gateway.start()
     void ensureTunnel()
+    void pushTunnelStatus()
     return url
   })
-  ipcMain.handle('gateway:stop', async () => gateway.stop())
+  ipcMain.handle('gateway:stop', async () => {
+    const result = await gateway.stop()
+    void pushTunnelStatus()
+    return result
+  })
   ipcMain.handle('gateway:status', async () => ({
     endpoint: gateway.endpoint,
     publicUrl: gateway.publicUrl,
@@ -834,6 +900,8 @@ app.whenReady().then(() => {
     tools: await gateway.getTools(),
     servers: gateway.getServers(),
   }))
+  // 公网连通状态（titlebar 指示器）：返回最新检测结果并触发即时推送
+  ipcMain.handle('tunnel:status', () => pushTunnelStatus())
   // 工具调用快照（按 MCP 会话分组 + 会话归属对话），Tools 面板按当前会话过滤展示
   ipcMain.handle('tools:calls', () => {
     const { sessions, recent } = gateway.getToolCalls()
@@ -1225,7 +1293,8 @@ app.whenReady().then(() => {
   })
 
   ipcMain.handle('panel:setCollapsed', (_e, collapsed: boolean) => { panelCollapsed = collapsed; layout() })
-  ipcMain.handle('chat:reload', () => chatView?.webContents.reload())
+  // 回到 ChatGPT 首页（加载到起始 URL）
+  ipcMain.handle('chat:goHome', () => { void chatView?.webContents.loadURL(CHATGPT_URL) })
 
   // ---------- 自动启动 Gateway ----------
   if (config.autoStart && config.projectRoot) {
@@ -1239,6 +1308,7 @@ app.whenReady().then(() => {
 })
 
 app.on('before-quit', () => {
+  if (tunnelStatusTimer) clearInterval(tunnelStatusTimer)
   void gateway?.stop()
   void todosServer?.stop()
   void tunnelManager?.stop()

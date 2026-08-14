@@ -148,6 +148,16 @@ export interface GatewayStatus {
   servers: unknown[]
 }
 
+/** 公网连通状态（titlebar 指示器） */
+export interface TunnelStatus {
+  /** checking=检测中 online=公网可达 offline=不可达 local=本地模式 gateway_stopped=网关未运行 */
+  state: 'checking' | 'online' | 'offline' | 'local' | 'gateway_stopped'
+  /** 公网地址（https://<domain>/mcp）；本地模式/网关未运行为空串 */
+  publicUrl: string
+  checkedAt: number
+  detail: string
+}
+
 /** 网关事件（Logs 面板） */
 export interface GatewayEvent {
   direction: 'system' | 'request' | 'response'
@@ -419,7 +429,11 @@ export interface FreeCodexApi {
   }
   /** 旧版原生文件夹选择器（保留兼容，UI 改用 projects.openFolder） */
   chooseProject: () => Promise<string | null>
-  reloadChat: () => Promise<void>
+  goHomeChat: () => Promise<void>
+  /** 公网连通状态（titlebar 指示器）：查询最新检测结果 */
+  tunnelStatus: () => Promise<TunnelStatus>
+  /** 订阅公网连通状态推送（主进程检测后主动下发），返回取消订阅函数 */
+  onTunnelStatus: (cb: (status: TunnelStatus) => void) => () => void
   setPanelCollapsed: (collapsed: boolean) => Promise<void>
   /** 设置 ChatGPT 页面主题（主程序亮/暗主题切换时注入 CSS 同步） */
   setTheme: (dark: boolean) => Promise<{ ok: boolean }>
