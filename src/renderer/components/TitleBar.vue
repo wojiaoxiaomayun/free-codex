@@ -23,45 +23,8 @@
     <!-- 中间：可拖拽区域（占满） -->
     <div class="flex-1"></div>
 
-    <!-- 右侧：公网状态 + 回到首页 + 设置 + 主题切换 + 窗口控制按钮 -->
+    <!-- 右侧：设置 + 主题切换 + 窗口控制按钮 -->
     <div class="titlebar-no-drag flex items-center">
-      <!-- 公网连通状态（点击重新检测） -->
-      <button
-        class="flex h-9 w-10 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-        aria-label="公网连通状态"
-        :title="tunnelTitle"
-        @click="refreshTunnelStatus"
-      >
-        <Loader2Icon v-if="tunnelState === 'checking'" class="size-4 animate-spin text-yellow-500" />
-        <WifiIcon v-else-if="tunnelState === 'online'" class="size-4 text-emerald-500" />
-        <WifiOffIcon v-else-if="tunnelState === 'offline'" class="size-4 text-red-500" />
-        <WifiIcon v-else-if="tunnelState === 'local'" class="size-4 text-muted-foreground" />
-        <WifiOffIcon v-else class="size-4 text-muted-foreground" />
-      </button>
-
-      <!-- 插件状态（freecodex 连接器；点击即时重新检测） -->
-      <button
-        class="flex h-9 w-10 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-        aria-label="插件状态"
-        :title="pluginTitle"
-        @click="refreshPluginStatus"
-      >
-        <Loader2Icon v-if="pluginState === 'checking'" class="size-4 animate-spin text-yellow-500" />
-        <PlugZapIcon v-else-if="pluginState === 'installed'" class="size-4 text-emerald-500" />
-        <PlugZapIcon v-else-if="pluginState === 'not-installed'" class="size-4 text-red-500" />
-        <PlugZapIcon v-else class="size-4 text-muted-foreground" />
-      </button>
-
-      <!-- 回到 ChatGPT 首页（Free Codex 特有：WebContentsView 加载起始 URL） -->
-      <button
-        class="flex h-9 w-10 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-        aria-label="回到 ChatGPT 首页"
-        title="回到 ChatGPT 首页"
-        @click="goHomeChat"
-      >
-        <HomeIcon class="size-4" />
-      </button>
-
       <!-- 底部终端开关（Ctrl+`） -->
       <button
         class="flex h-9 w-10 items-center justify-center transition-colors"
@@ -166,18 +129,13 @@ import {
   CopyIcon,
   FolderIcon,
   FolderOpenIcon,
-  HomeIcon,
-  Loader2Icon,
   MinusIcon,
   MoonIcon,
-  PlugZapIcon,
   SettingsIcon,
   SquareIcon,
   SunIcon,
   SunMoonIcon,
   TerminalIcon,
-  WifiIcon,
-  WifiOffIcon,
   XIcon,
 } from 'lucide-vue-next'
 import {
@@ -187,7 +145,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { isDark, theme } from '@/composables/useTheme'
-import type { FreeCodexWindowControls, PluginStatus, ProjectState, TunnelStatus } from '../freecodex'
+import type { FreeCodexWindowControls, ProjectState } from '../freecodex'
 
 const windowControls: FreeCodexWindowControls = window.freeCodex.windowControls
 const router = useRouter()
@@ -220,66 +178,6 @@ async function openProjectFolder(): Promise<void> {
   const result = await window.freeCodex.projects.openInSystem()
   if (!result.ok) {
     toast.error(`打开项目文件夹失败：${result.error ?? '未知错误'}`)
-  }
-}
-
-/** 回到 ChatGPT 首页（加载起始 URL，避免刷新只重载当前链接） */
-async function goHomeChat(): Promise<void> {
-  await window.freeCodex.goHomeChat()
-}
-
-// ---------- 公网连通状态（右上角指示器）----------
-const tunnelStatus = ref<TunnelStatus>({
-  state: 'checking',
-  publicUrl: '',
-  checkedAt: 0,
-  detail: '检测中…',
-})
-let unsubscribeTunnelStatus: (() => void) | undefined
-
-const tunnelState = computed(() => tunnelStatus.value.state)
-
-/** 悬浮提示：状态详情 + 公网地址 */
-const tunnelTitle = computed(() => {
-  const s = tunnelStatus.value
-  return s.publicUrl ? `${s.detail}\n公网地址: ${s.publicUrl}` : s.detail
-})
-
-/** 手动触发重新检测 */
-async function refreshTunnelStatus(): Promise<void> {
-  tunnelStatus.value = await window.freeCodex.tunnelStatus()
-}
-
-// ---------- 右上角插件状态（freecodex 连接器）----------
-const pluginStatus = ref<PluginStatus>({ state: 'checking', checkedAt: 0 })
-let unsubscribePluginStatus: (() => void) | undefined
-
-const pluginState = computed(() => pluginStatus.value.state)
-
-/** 悬浮提示：插件状态详情 */
-const pluginTitle = computed(() => {
-  const s = pluginStatus.value
-  switch (s.state) {
-    case 'installed':
-      return `插件: 已安装 (${s.displayName ?? ''})`
-    case 'not-installed':
-      return '插件: 未安装'
-    case 'no-login':
-      return '插件: 未登录 ChatGPT'
-    case 'no-domain':
-      return '插件: 未配置公网域名'
-    default:
-      return '插件: 检测中…'
-  }
-})
-
-/** 点击插件图标 → 即时重新检测（先转圈给反馈，避免"点了没反应"的错觉） */
-async function refreshPluginStatus(): Promise<void> {
-  pluginStatus.value = { state: 'checking', checkedAt: Date.now() }
-  try {
-    pluginStatus.value = await window.freeCodex.pluginStatus()
-  } catch {
-    pluginStatus.value = { state: 'checking', checkedAt: Date.now() }
   }
 }
 
@@ -340,14 +238,6 @@ onMounted(async () => {
   unsubscribeProjectChanged = window.freeCodex.onProjectChanged((state) => {
     activeProject.value = state as ProjectState
   })
-  // 公网连通状态：订阅主进程推送 + 启动时立即检测一次
-  unsubscribeTunnelStatus = window.freeCodex.onTunnelStatus((status) => {
-    tunnelStatus.value = status as TunnelStatus
-  })
-  // 右上角插件状态：订阅主进程推送（主进程 30s 轮询 + 安装/登录后即时推）
-  unsubscribePluginStatus = window.freeCodex.onPluginStatus((status) => {
-    pluginStatus.value = status as PluginStatus
-  })
   // 终端面板可见状态（按钮高亮）：订阅推送 + 初始化查询
   unsubscribeTerminalVisible = window.freeCodex.terminal.onVisible((visible) => {
     terminalVisible.value = visible
@@ -356,14 +246,11 @@ onMounted(async () => {
   await windowControls.isMaximized().then((v) => { maximized.value = v }).catch(() => undefined)
   await window.freeCodex.projects.get().then((s) => { activeProject.value = s as ProjectState }).catch(() => undefined)
   await window.freeCodex.terminal.visible().then((v) => { terminalVisible.value = v }).catch(() => undefined)
-  void refreshTunnelStatus().catch(() => undefined)
 })
 
 onUnmounted(() => {
   unsubscribe?.()
   unsubscribeProjectChanged?.()
-  unsubscribeTunnelStatus?.()
-  unsubscribePluginStatus?.()
   unsubscribeTerminalVisible?.()
 })
 </script>

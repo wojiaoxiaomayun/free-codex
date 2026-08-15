@@ -542,6 +542,8 @@ export interface FreeCodexApi {
   /** 旧版原生文件夹选择器（保留兼容，UI 改用 projects.openFolder） */
   chooseProject: () => Promise<string | null>
   goHomeChat: () => Promise<void>
+  /** 刷新当前页面（首页 → 刷新 ChatGPT 视图；设置/欢迎页 → 刷新本渲染层页面） */
+  refreshView: () => Promise<void>
   /** 公网连通状态（titlebar 指示器）：查询最新检测结果 */
   tunnelStatus: () => Promise<TunnelStatus>
   /** 右上角插件状态：点击图标即时查询最新检测结果 */

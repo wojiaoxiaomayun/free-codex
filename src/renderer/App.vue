@@ -5,9 +5,14 @@
 
     <!-- 主体：中间 ChatGPT 网页视图 / 应用页面 + 右侧工具面板 -->
     <div class="flex min-h-0 flex-1">
-      <main class="min-w-0 flex-1 overflow-hidden bg-background">
-        <router-view />
-      </main>
+      <!-- 左列：副工具栏 + 页面内容（副栏宽度自动与 ChatGPT/终端视图一致，不越过右侧面板） -->
+      <div class="flex min-w-0 flex-1 flex-col">
+        <!-- 副工具栏（titlebar 与 ChatGPT 原生 WebContentsView 之间：首页 / 刷新 / 公网状态 / 插件状态） -->
+        <SubBar />
+        <main class="min-w-0 flex-1 overflow-hidden bg-background">
+          <router-view />
+        </main>
+      </div>
 
       <!-- 右侧工具面板仅在 AI 应用页面显示（设置/欢迎页展示工具调用记录无意义） -->
       <RightPanel v-if="!isAppPage" />
@@ -19,6 +24,7 @@
 import { computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import TitleBar from './components/TitleBar.vue'
+import SubBar from './components/SubBar.vue'
 import RightPanel from './components/RightPanel.vue'
 
 const route = useRoute()

@@ -74,6 +74,8 @@ export function exposeFreeCodexApi(): void {
     close: () => ipcRenderer.invoke('window:close'),
     setPanelCollapsed: (collapsed: boolean) => ipcRenderer.invoke('panel:setCollapsed', collapsed),
     goHomeChat: () => ipcRenderer.invoke('chat:goHome'),
+    /** 刷新当前页面（首页 → 刷新 ChatGPT 视图；设置/欢迎页 → 刷新本渲染层页面） */
+    refreshView: (): Promise<void> => ipcRenderer.invoke('browser:refresh'),
     /** 公网连通状态（titlebar 指示器）：查询最新检测结果 */
     tunnelStatus: (): Promise<unknown> => ipcRenderer.invoke('tunnel:status'),
     /** 右上角插件状态：点击图标即时查询最新检测结果 */

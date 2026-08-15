@@ -49,6 +49,8 @@ import { applyUserAgentFallback, applySessionSpoofing, CHROME_UA } from './ua'
 applyUserAgentFallback()
 
 const TITLEBAR_HEIGHT = 36
+/** 副工具栏高度（titlebar 与 ChatGPT 视图之间：首页 / 公网状态 / 插件状态 / 刷新） */
+const SUB_BAR_HEIGHT = 36
 const PANEL_WIDTH = 348
 const PANEL_RAIL = 40
 /** 底部终端默认高度（可拖拽调整 100~600） */
@@ -272,8 +274,11 @@ function layout() {
   // 终端只在 ChatGPT 视图显示时展示（进入设置/应用页面时随 chatView 一起隐藏）
   const termActive = terminalVisible && viewVisible
   const termH = termActive ? Math.min(termHeight, Math.max(120, areaH - 120)) : 0
-  chatView.setBounds({ x: 0, y: TITLEBAR_HEIGHT, width: areaW, height: Math.max(0, areaH - termH) })
+  // 副工具栏在渲染层占据 titlebar 下方 SUB_BAR_HEIGHT 高度，原生视图从副栏下方开始
+  const top = TITLEBAR_HEIGHT + SUB_BAR_HEIGHT
+  chatView.setBounds({ x: 0, y: top, width: areaW, height: Math.max(0, areaH - SUB_BAR_HEIGHT - termH) })
   if (termView) {
+    // 终端仍锚定窗口底部（chatView 底部 = 副栏下方 + 剩余高度，二者衔接不变）
     termView.setBounds({ x: 0, y: TITLEBAR_HEIGHT + Math.max(0, areaH - termH), width: areaW, height: termH })
     termView.setVisible(termActive && termH > 0)
   }
@@ -1987,6 +1992,14 @@ app.whenReady().then(async () => {
   ipcMain.handle('panel:setCollapsed', (_e, collapsed: boolean) => { panelCollapsed = collapsed; layout() })
   // 回到 ChatGPT 首页（加载到起始 URL）
   ipcMain.handle('chat:goHome', () => { void chatView?.webContents.loadURL(CHATGPT_URL) })
+  // 刷新当前页面：首页（ChatGPT 视图可见）→ 重载原生视图；应用页（设置/欢迎）→ 重载主渲染层当前页
+  ipcMain.handle('browser:refresh', () => {
+    if (viewVisible && chatView && !chatView.webContents.isDestroyed()) {
+      chatView.webContents.reload()
+    } else if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
+      win.webContents.reload()
+    }
+  })
 
   // ---------- 自动启动 Gateway ----------
   if (config.autoStart && config.projectRoot) {
