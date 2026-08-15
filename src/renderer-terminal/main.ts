@@ -1,9 +1,10 @@
 /**
- * 终端页面（主窗口底部 termView）：xterm.js + ConPTY 会话
+ * 终端页面（主窗口底部 termView）：xterm.js + ConPTY，多标签
  *
- * - fit 自适应 + ResizeObserver 上报尺寸
- * - Ctrl+Shift+C 复制 / Ctrl+Shift+V 粘贴 / 右键粘贴（Windows Terminal 习惯）
- * - Ctrl+Shift+F 搜索（Enter 下一个 / Shift+Enter 上一个 / Esc 关闭）
+ * - 每个标签一个独立 xterm + PTY 会话（id 路由）
+ * - 标签栏：点击切换 / × 关闭（中键关闭）/ + 新建 / 全部关闭后空态可重建
+ * - 顶部拖拽手柄：pointerdown → 主进程轮询光标调整面板高度
+ * - Ctrl+Shift+C 复制 / Ctrl+Shift+V 粘贴 / 右键粘贴 / Ctrl+Shift+F 搜索（作用于当前标签）
  * - 明暗主题跟随应用
  */
 
@@ -60,103 +61,6 @@ const lightTheme = {
   brightWhite: '#a5a5a5',
 }
 
-const term = new Terminal({
-  cursorBlink: true,
-  fontFamily: "'Cascadia Mono', Consolas, 'Courier New', monospace",
-  fontSize: 13,
-  lineHeight: 1.2,
-  scrollback: 5000,
-  allowProposedApi: true,
-  theme: darkTheme,
-})
-
-const fit = new FitAddon()
-const search = new SearchAddon()
-term.loadAddon(fit)
-term.loadAddon(new WebLinksAddon())
-term.loadAddon(search)
-
-const app = document.getElementById('app')
-if (!app) throw new Error('no #app')
-term.open(app)
-fit.fit()
-reportSize()
-
-// ---------- 主题 ----------
-function applyTheme(dark: boolean): void {
-  term.options.theme = dark ? darkTheme : lightTheme
-  document.body.style.background = (term.options.theme as { background: string }).background
-}
-window.termApi.onTheme((dark) => applyTheme(dark === true))
-
-// ---------- 会话生命周期 ----------
-window.termApi.onSession(() => {
-  term.clear()
-  fit.fit()
-  reportSize()
-  term.focus()
-})
-window.termApi.onData((data) => term.write(data))
-window.termApi.onFocus(() => term.focus())
-window.termApi.onExit((info) => {
-  term.write(`\r\n\x1b[1;31m[进程已退出 code=${info.exitCode ?? '?'}]\x1b[0m\r\n`)
-})
-
-// 用户输入 → 主进程
-term.onData((data) => window.termApi.write(data))
-
-// ---------- 尺寸 ----------
-const ro = new ResizeObserver(() => {
-  fit.fit()
-  reportSize()
-})
-ro.observe(document.body)
-
-function reportSize(): void {
-  window.termApi.resize(term.cols, term.rows)
-}
-
-// ---------- 复制 / 粘贴 / 搜索快捷键 ----------
-function pasteText(): void {
-  const text = window.termApi.paste()
-  if (text) term.paste(text.replace(/\r?\n/g, '\r'))
-}
-
-term.attachCustomKeyEventHandler((e) => {
-  // 语义：返回 false = 拦截（xterm 不再处理）；返回 true/undefined = 交给 xterm 正常处理
-  if (e.type !== 'keydown') return true
-  const mod = e.ctrlKey || e.metaKey
-  if (mod && e.shiftKey && (e.key === 'C' || e.key === 'c')) {
-    const sel = term.getSelection()
-    if (sel) void navigator.clipboard.writeText(sel).catch(() => undefined)
-    e.preventDefault()
-    return false
-  }
-  if (mod && e.shiftKey && (e.key === 'V' || e.key === 'v')) {
-    pasteText()
-    e.preventDefault()
-    return false
-  }
-  if (mod && e.shiftKey && (e.key === 'F' || e.key === 'f')) {
-    toggleSearch()
-    e.preventDefault()
-    return false
-  }
-  // 其他按键全部交给 xterm（之前误返回 false 导致键盘输入被全部吞掉）
-  return true
-})
-
-// 右键粘贴（Windows Terminal 习惯）：终端区域任意位置
-term.element?.addEventListener('contextmenu', (e) => {
-  e.preventDefault()
-  pasteText()
-})
-
-// ---------- 搜索浮层 ----------
-const searchBox = document.getElementById('search') as HTMLElement
-const searchInput = document.getElementById('searchInput') as HTMLInputElement
-const searchCount = document.getElementById('searchCount') as HTMLElement
-let searchResult: { resultIndex: number; resultCount: number } | null = null
 /** 搜索匹配高亮装饰（isSearchDecorationOptions：overviewRuler 字段必填） */
 const searchDecoration = {
   matchBackground: '#3a3a3a',
@@ -165,17 +69,249 @@ const searchDecoration = {
   activeMatchColorOverviewRuler: '#8a6d1a',
 }
 
-search.onDidChangeResults((result) => {
-  searchResult = result
-  const total = result.resultCount
-  const cur = total > 0 ? result.resultIndex + 1 : 0
-  searchCount.textContent = total > 0 ? `${cur}/${total}` : '0/0'
+interface TermTab {
+  id: string
+  term: Terminal
+  fit: FitAddon
+  search: SearchAddon
+  host: HTMLElement
+  label: string
+}
+
+const tabs: TermTab[] = []
+let activeId: string | null = null
+let tabSeq = 0
+
+const tabbar = document.getElementById('tabbar') as HTMLElement
+const container = document.getElementById('container') as HTMLElement
+const emptyEl = document.getElementById('empty') as HTMLElement
+const dragHandle = document.getElementById('drag-handle') as HTMLElement
+
+// ---------- 主题 ----------
+function applyTheme(isDark: boolean): void {
+  document.body.classList.toggle('light', !isDark)
+  document.body.style.background = isDark ? '#1e1f22' : '#ffffff'
+  for (const t of tabs) t.term.options.theme = isDark ? darkTheme : lightTheme
+}
+window.termApi.onTheme((isDark) => applyTheme(isDark === true))
+
+// ---------- 标签管理 ----------
+function findTab(id: string): TermTab | undefined {
+  return tabs.find((t) => t.id === id)
+}
+
+function reportSize(id: string): void {
+  const t = findTab(id)
+  if (t) window.termApi.resize(id, t.term.cols, t.term.rows)
+}
+
+function pasteTo(term: Terminal): void {
+  const text = window.termApi.paste()
+  if (text) term.paste(text.replace(/\r?\n/g, '\r'))
+}
+
+function newTab(): TermTab {
+  tabSeq += 1
+  const id = `t${tabSeq}`
+  const host = document.createElement('div')
+  host.className = 'term-host'
+  container.insertBefore(host, emptyEl)
+
+  const term = new Terminal({
+    cursorBlink: true,
+    fontFamily: "'Cascadia Mono', Consolas, 'Courier New', monospace",
+    fontSize: 13,
+    lineHeight: 1.2,
+    scrollback: 5000,
+    allowProposedApi: true,
+    theme: document.body.classList.contains('light') ? lightTheme : darkTheme,
+  })
+  const fit = new FitAddon()
+  const search = new SearchAddon()
+  term.loadAddon(fit)
+  term.loadAddon(new WebLinksAddon())
+  term.loadAddon(search)
+  search.onDidChangeResults((result) => {
+    const total = result.resultCount
+    const cur = total > 0 ? result.resultIndex + 1 : 0
+    searchCount.textContent = total > 0 ? `${cur}/${total}` : '0/0'
+  })
+  term.open(host)
+
+  // 用户输入 → 对应会话
+  term.onData((data) => window.termApi.write(id, data))
+
+  // 快捷键（语义：返回 false = 拦截，true = 交给 xterm）
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type !== 'keydown') return true
+    const mod = e.ctrlKey || e.metaKey
+    if (mod && e.shiftKey && (e.key === 'C' || e.key === 'c')) {
+      const sel = term.getSelection()
+      if (sel) void navigator.clipboard.writeText(sel).catch(() => undefined)
+      e.preventDefault()
+      return false
+    }
+    if (mod && e.shiftKey && (e.key === 'V' || e.key === 'v')) {
+      pasteTo(term)
+      e.preventDefault()
+      return false
+    }
+    if (mod && e.shiftKey && (e.key === 'F' || e.key === 'f')) {
+      toggleSearch()
+      e.preventDefault()
+      return false
+    }
+    return true
+  })
+
+  // 右键粘贴
+  term.element?.addEventListener('contextmenu', (e) => {
+    e.preventDefault()
+    pasteTo(term)
+  })
+
+  const tab: TermTab = { id, term, fit, search, host, label: `终端 ${tabSeq}` }
+  tabs.push(tab)
+  renderTabBar()
+  activateTab(id)
+  window.termApi.spawn(id)
+  return tab
+}
+
+function activateTab(id: string): void {
+  activeId = id
+  for (const t of tabs) t.host.style.display = t.id === id ? '' : 'none'
+  emptyEl.classList.toggle('hidden', tabs.length > 0)
+  renderTabBar()
+  searchCount.textContent = ''
+  const tab = findTab(id)
+  if (tab) {
+    try {
+      tab.fit.fit()
+    } catch {
+      /* 容器暂不可见时忽略 */
+    }
+    reportSize(id)
+    tab.term.focus()
+  }
+}
+
+function closeTab(id: string): void {
+  const idx = tabs.findIndex((t) => t.id === id)
+  if (idx < 0) return
+  const [tab] = tabs.splice(idx, 1)
+  window.termApi.kill(id)
+  tab.term.dispose()
+  tab.host.remove()
+  if (tabs.length === 0) {
+    activeId = null
+    renderTabBar()
+    emptyEl.classList.remove('hidden')
+  } else {
+    activateTab(tabs[Math.min(idx, tabs.length - 1)].id)
+  }
+}
+
+function renderTabBar(): void {
+  tabbar.innerHTML = ''
+  for (const t of tabs) {
+    const el = document.createElement('div')
+    el.className = 'tab' + (t.id === activeId ? ' active' : '')
+    el.title = t.label
+    const name = document.createElement('span')
+    name.className = 'tab-name'
+    name.textContent = t.label
+    const close = document.createElement('span')
+    close.className = 'tab-close'
+    close.textContent = '×'
+    close.title = '关闭终端'
+    el.appendChild(name)
+    el.appendChild(close)
+    el.addEventListener('click', () => activateTab(t.id))
+    close.addEventListener('click', (e) => {
+      e.stopPropagation()
+      closeTab(t.id)
+    })
+    // 中键关闭
+    el.addEventListener('auxclick', (e) => {
+      if (e.button === 1) closeTab(t.id)
+    })
+    tabbar.appendChild(el)
+  }
+  const addBtn = document.createElement('button')
+  addBtn.className = 'tab-add'
+  addBtn.textContent = '+'
+  addBtn.title = '新建终端'
+  addBtn.addEventListener('click', () => newTab())
+  tabbar.appendChild(addBtn)
+}
+
+document.getElementById('empty-new')!.addEventListener('click', () => newTab())
+
+// ---------- 会话事件路由 ----------
+window.termApi.onData(({ id, data }) => findTab(id)?.term.write(data))
+window.termApi.onSession(({ id }) => {
+  const t = findTab(id)
+  if (t) {
+    t.term.clear()
+    try {
+      t.fit.fit()
+    } catch {
+      /* ignore */
+    }
+    reportSize(id)
+  }
 })
+window.termApi.onExit(({ id, exitCode }) => {
+  const t = findTab(id)
+  if (t) t.term.write(`\r\n\x1b[1;31m[进程已退出 code=${exitCode ?? '?'}]\x1b[0m\r\n`)
+})
+window.termApi.onFocus(() => findTab(activeId ?? '')?.term.focus())
+/** 项目切换：主进程已终止全部会话 → 清屏并逐个重拉（新 cwd） */
+window.termApi.onRestartAll(() => {
+  for (const t of tabs) {
+    t.term.clear()
+    window.termApi.spawn(t.id)
+  }
+})
+
+// ---------- 尺寸 ----------
+const ro = new ResizeObserver(() => {
+  const t = findTab(activeId ?? '')
+  if (t) {
+    try {
+      t.fit.fit()
+    } catch {
+      /* ignore */
+    }
+    reportSize(t.id)
+  }
+})
+ro.observe(document.body)
+
+// ---------- 高度拖拽（主进程轮询光标） ----------
+dragHandle.addEventListener('pointerdown', (e) => {
+  e.preventDefault()
+  window.termApi.dragStart()
+})
+document.addEventListener('pointerup', () => window.termApi.dragEnd())
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') window.termApi.dragEnd()
+})
+
+// ---------- 搜索浮层（作用于当前标签） ----------
+const searchBox = document.getElementById('search') as HTMLElement
+const searchInput = document.getElementById('searchInput') as HTMLInputElement
+const searchCount = document.getElementById('searchCount') as HTMLElement
+
+function activeSearch(): SearchAddon | null {
+  return findTab(activeId ?? '')?.search ?? null
+}
 
 function toggleSearch(): void {
   if (searchBox.classList.contains('hidden')) {
     searchBox.classList.remove('hidden')
-    searchInput.value = term.getSelection() || ''
+    searchInput.value = findTab(activeId ?? '')?.term.getSelection() || ''
     searchInput.focus()
     void runSearch()
   } else {
@@ -185,25 +321,28 @@ function toggleSearch(): void {
 
 function closeSearch(): void {
   searchBox.classList.add('hidden')
-  search.clearDecorations()
-  term.focus()
+  activeSearch()?.clearDecorations()
+  findTab(activeId ?? '')?.term.focus()
 }
 
 async function runSearch(): Promise<void> {
+  const addon = activeSearch()
   const q = searchInput.value
-  if (!q) {
-    search.clearDecorations()
+  if (!addon || !q) {
+    addon?.clearDecorations()
     searchCount.textContent = ''
     return
   }
-  await search.findNext(q, { incremental: true, decorations: searchDecoration })
+  await addon.findNext(q, { incremental: true, decorations: searchDecoration })
 }
 
 searchInput.addEventListener('keydown', (e) => {
+  const addon = activeSearch()
+  if (!addon) return
   if (e.key === 'Enter') {
     e.preventDefault()
-    if (e.shiftKey) void search.findPrevious(searchInput.value, { decorations: searchDecoration })
-    else void search.findNext(searchInput.value, { decorations: searchDecoration })
+    if (e.shiftKey) void addon.findPrevious(searchInput.value, { decorations: searchDecoration })
+    else void addon.findNext(searchInput.value, { decorations: searchDecoration })
   } else if (e.key === 'Escape') {
     e.preventDefault()
     closeSearch()
@@ -212,12 +351,14 @@ searchInput.addEventListener('keydown', (e) => {
   }
 })
 document.getElementById('searchPrev')!.addEventListener('click', () => {
-  void search.findPrevious(searchInput.value, { decorations: searchDecoration })
+  activeSearch()?.findPrevious(searchInput.value, { decorations: searchDecoration })
 })
 document.getElementById('searchNext')!.addEventListener('click', () => {
-  void search.findNext(searchInput.value, { decorations: searchDecoration })
+  activeSearch()?.findNext(searchInput.value, { decorations: searchDecoration })
 })
 document.getElementById('searchClose')!.addEventListener('click', closeSearch)
 
-// ---------- 就绪：请求主进程拉起会话 ----------
-window.termApi.ready()
+// ---------- 初始化 ----------
+window.termApi.pageReady() // 清理孤儿会话（页面重载场景）
+applyTheme(false) // 默认暗色，主进程随后推送主题
+newTab() // 首个标签

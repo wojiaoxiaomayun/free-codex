@@ -1,22 +1,24 @@
 /**
  * 终端会话管理（node-pty + ConPTY，Windows 原生体验）
  *
- * 单一活跃会话：spawn PowerShell（cwd = 项目根目录）、写入、resize、kill；
- * 项目切换时由上层 kill 后重新 spawn（新会话进新项目根目录）。
+ * 多会话：每个标签页一个 PTY 会话，sessionId → IPty 映射。
+ * spawn（cwd = 项目根目录）、write、resize、kill 均按会话 id 路由；
+ * 项目切换时由上层 killAll 后由渲染层按标签逐个重新 spawn（新会话进新项目根目录）。
  */
 
 import { spawn, type IPty } from 'node-pty'
 
 export interface TerminalCallbacks {
-  onData: (data: string) => void
-  onExit: (exitCode: number | null) => void
+  onData: (id: string, data: string) => void
+  onExit: (id: string, exitCode: number | null) => void
 }
 
-let pty: IPty | null = null
+const sessions = new Map<string, IPty>()
 
-/** 拉起 PowerShell 会话（先杀掉旧会话）；返回是否成功 */
-export function spawnTerminal(cwd: string, cb: TerminalCallbacks): { ok: boolean; error?: string } {
-  killTerminal()
+/** 拉起 PowerShell 会话（同 id 先杀旧的）；返回是否成功 */
+export function spawnTerminal(id: string, cwd: string, cb: TerminalCallbacks): { ok: boolean; error?: string } {
+  killTerminal(id)
+  let pty: IPty
   try {
     pty = spawn('powershell.exe', ['-NoLogo'], {
       name: 'xterm-256color',
@@ -26,45 +28,53 @@ export function spawnTerminal(cwd: string, cb: TerminalCallbacks): { ok: boolean
       env: { ...process.env, TERM: 'xterm-256color' },
     })
   } catch (err) {
-    pty = null
-    console.error('[term] spawn 失败:', err instanceof Error ? err.message : String(err))
+    console.error('[term] 会话启动失败:', id, err instanceof Error ? err.message : String(err))
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
-  console.log('[term] PowerShell 已 spawn, cwd=', cwd, 'pid=', pty.pid)
-  pty.onData((data) => cb.onData(data))
+  sessions.set(id, pty)
+  console.log('[term] 会话已启动:', id, 'cwd=', cwd)
+  pty.onData((data) => cb.onData(id, data))
   pty.onExit(({ exitCode }) => {
-    console.log('[term] 会话退出 code=', exitCode)
-    pty = null
-    cb.onExit(exitCode)
+    sessions.delete(id)
+    console.log('[term] 会话退出:', id, 'code=', exitCode)
+    cb.onExit(id, exitCode)
   })
   return { ok: true }
 }
 
-export function writeTerminal(data: string): void {
+export function writeTerminal(id: string, data: string): void {
   try {
-    pty?.write(data)
+    sessions.get(id)?.write(data)
   } catch {
     /* 会话已退出则忽略 */
   }
 }
 
-export function resizeTerminal(cols: number, rows: number): void {
+export function resizeTerminal(id: string, cols: number, rows: number): void {
   try {
-    pty?.resize(Math.max(2, cols), Math.max(1, rows))
+    sessions.get(id)?.resize(Math.max(2, cols), Math.max(1, rows))
   } catch {
     /* 会话已退出则忽略 */
   }
 }
 
-export function killTerminal(): void {
-  try {
-    pty?.kill()
-  } catch {
-    /* 已退出则忽略 */
+export function killTerminal(id: string): void {
+  const pty = sessions.get(id)
+  if (pty) {
+    try {
+      pty.kill()
+    } catch {
+      /* 已退出则忽略 */
+    }
   }
-  pty = null
+  sessions.delete(id)
 }
 
-export function terminalAlive(): boolean {
-  return pty !== null
+/** 终止全部会话（项目切换 / 页面重载清理孤儿会话） */
+export function killAllTerminals(): void {
+  for (const id of [...sessions.keys()]) killTerminal(id)
+}
+
+export function terminalCount(): number {
+  return sessions.size
 }

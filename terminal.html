@@ -10,7 +10,20 @@
     <title>Free Codex Terminal</title>
   </head>
   <body>
-    <div id="app"></div>
+    <!-- 高度拖拽手柄（主进程轮询光标调整面板高度） -->
+    <div id="drag-handle" title="拖拽调整终端高度"></div>
+
+    <!-- 标签栏 -->
+    <div id="tabbar"></div>
+
+    <!-- 终端容器（每个标签一个 .term-host，仅激活项可见） -->
+    <div id="container">
+      <div id="empty" class="empty hidden">
+        <button id="empty-new">+ 新建终端</button>
+      </div>
+    </div>
+
+    <!-- 搜索浮层 -->
     <div id="search" class="search hidden">
       <input id="searchInput" type="text" placeholder="搜索终端输出…" spellcheck="false" />
       <span id="searchCount" class="search-count"></span>
