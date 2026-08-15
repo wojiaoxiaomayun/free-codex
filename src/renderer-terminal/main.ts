@@ -97,6 +97,81 @@ function applyTheme(isDark: boolean): void {
 }
 window.termApi.onTheme((isDark) => applyTheme(isDark === true))
 
+// ---------- 字体（Nerd Fonts 图标字形支持）----------
+/** 常见 Nerd Font 名称（图标字形所在字体），按优先级探测 */
+const NERD_FONTS = [
+  'CaskaydiaCove Nerd Font',
+  'CaskaydiaCove NF',
+  'JetBrainsMono Nerd Font',
+  'JetBrainsMono NF',
+  'MesloLGM Nerd Font',
+  'MesloLGM NF',
+  'FiraCode Nerd Font',
+  'FiraCode NF',
+  'Hack Nerd Font',
+  'Hack NF',
+  'UbuntuMono Nerd Font',
+  'SauceCodePro Nerd Font',
+  'Cousine Nerd Font',
+  'DejaVu Sans Mono Nerd Font',
+  'VictorMono Nerd Font',
+  'Iosevka Nerd Font',
+  'SpaceMono Nerd Font',
+  'Mononoki Nerd Font',
+  'Terminess Nerd Font',
+  'RobotoMono Nerd Font',
+  '0xProto Nerd Font',
+  'GeistMono Nerd Font',
+  // 带 Powerline 符号的版本（部分图标可用）
+  'Cascadia Code PL',
+  'Cascadia Mono PL',
+]
+
+/** 当前选中的终端字体（null = 未确定） */
+let selectedFont: string | null = null
+
+function isFontAvailable(face: string): boolean {
+  try {
+    return document.fonts.check(`16px "${face}"`)
+  } catch {
+    return false
+  }
+}
+
+function probeNerdFont(): string | null {
+  for (const name of NERD_FONTS) {
+    if (isFontAvailable(name)) return name
+  }
+  return null
+}
+
+function fontStack(): string {
+  if (selectedFont) return `"${selectedFont}", 'Cascadia Mono', Consolas, 'Courier New', monospace`
+  return "'Cascadia Mono', Consolas, 'Courier New', monospace"
+}
+
+/**
+ * 应用字体：Nerd Font 优先（图标字形超集，含 Powerline 符号），
+ * 其次 Windows Terminal 配置的字体（可用时），最后默认等宽字体。
+ */
+function resolveFont(wtFace: string | null): void {
+  const candidate = probeNerdFont() ?? (wtFace && isFontAvailable(wtFace) ? wtFace : null)
+  if (candidate === selectedFont) return
+  selectedFont = candidate
+  const stack = fontStack()
+  for (const t of tabs) {
+    t.term.options.fontFamily = stack
+    try {
+      t.fit.fit()
+    } catch {
+      /* ignore */
+    }
+    reportSize(t.id)
+  }
+}
+
+window.termApi.onFont((face) => resolveFont(face ?? null))
+
 // ---------- 标签管理 ----------
 function findTab(id: string): TermTab | undefined {
   return tabs.find((t) => t.id === id)
@@ -121,7 +196,7 @@ function newTab(): TermTab {
 
   const term = new Terminal({
     cursorBlink: true,
-    fontFamily: "'Cascadia Mono', Consolas, 'Courier New', monospace",
+    fontFamily: fontStack(),
     fontSize: 13,
     lineHeight: 1.2,
     scrollback: 5000,
@@ -372,5 +447,6 @@ document.getElementById('searchClose')!.addEventListener('click', closeSearch)
 // ---------- 初始化 ----------
 window.termApi.pageReady() // 清理孤儿会话（页面重载场景）
 applyTheme(false) // 默认暗色，主进程随后推送主题
+resolveFont(null) // 先做 Nerd Font 探测；term:font（Windows Terminal 配置）到达后覆盖
 // 无标签时显示空态（首个标签由面板打开触发创建）
 emptyEl.classList.remove('hidden')

@@ -1,6 +1,6 @@
 import { app, BrowserWindow, BrowserWindowConstructorOptions, dialog, ipcMain, screen, session, shell, WebContentsView, type WebContents } from 'electron'
 import { is } from '@electron-toolkit/utils'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { loadConfig, saveConfig, importCodexPublicConfig, type Config, type ProxyConfig } from './config'
 import { syncCodexMcpConfig } from './codex-config-sync'
@@ -408,6 +408,51 @@ function registerTerminalShortcut(webContents: WebContents) {
 // 底部终端（termView + node-pty / ConPTY，多标签 + 高度拖拽）
 // ------------------------------------------------------------
 
+/**
+ * 从 Windows Terminal 配置里提取用户主题的字体（图标字形通常来自 Nerd Fonts）。
+ * 优先打包版（Packages\Microsoft.WindowsTerminal_*\LocalState），其次便携版。
+ * 找不到/解析失败返回 null，渲染层再走 Nerd Font 自动探测兜底。
+ */
+function findWindowsTerminalFontFace(): string | null {
+  const packagesDir = path.join(app.getPath('home'), 'AppData', 'Local', 'Packages')
+  let settingsPath: string | null = null
+  try {
+    for (const entry of readdirSync(packagesDir)) {
+      if (entry.startsWith('Microsoft.WindowsTerminal')) {
+        const candidate = path.join(packagesDir, entry, 'LocalState', 'settings.json')
+        if (existsSync(candidate)) {
+          settingsPath = candidate
+          break
+        }
+      }
+    }
+  } catch {
+    /* 目录不可读则忽略 */
+  }
+  if (!settingsPath) {
+    const alt = path.join(app.getPath('home'), 'AppData', 'Local', 'Microsoft', 'Windows Terminal', 'settings.json')
+    if (existsSync(alt)) settingsPath = alt
+  }
+  if (!settingsPath) return null
+  try {
+    const raw = JSON.parse(readFileSync(settingsPath, 'utf8')) as {
+      profiles?: { defaults?: { font?: { face?: string } }; list?: Array<{ guid?: string; default?: boolean; font?: { face?: string } }>; defaultProfile?: string }
+    }
+    const face = raw?.profiles?.defaults?.font?.face
+    if (typeof face === 'string' && face.trim()) return face.trim()
+    const list = raw?.profiles?.list
+    if (Array.isArray(list)) {
+      const defGuid = raw?.profiles?.defaultProfile
+      const def = list.find((p) => p && (p.default === true || (defGuid && p.guid === defGuid)))
+      const f = def?.font?.face ?? list.find((p) => p?.font?.face)?.font?.face
+      if (typeof f === 'string' && f.trim()) return f.trim()
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
 /** 当前激活项目的根目录（无激活项目时回退配置里的 projectRoot；未初始化返回空串） */
 function activeProjectRoot(): string {
   return projects?.getState().active ?? config?.projectRoot ?? ''
@@ -718,6 +763,8 @@ async function createWindow() {
   // 初始主题同步（termView 可能早于首次主题应用加载完成）
   termView.webContents.on('did-finish-load', () => {
     termView?.webContents.send('term:theme', currentThemeDark)
+    // 字体同步（Windows Terminal 主题字体 → 图标字形可用）
+    termView?.webContents.send('term:font', findWindowsTerminalFontFace())
     // 页面加载晚于面板首次打开时补发 focus：触发首个标签创建（延迟到可见时，避免零尺寸竖排）
     if (terminalVisible) termView?.webContents.send('term:focus')
   })
