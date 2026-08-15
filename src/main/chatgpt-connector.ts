@@ -27,7 +27,11 @@ export function hasChatgptToken(): boolean {
 }
 
 /** 从 session 层捕获 ChatGPT 请求的 Authorization 头（应用生命周期内常驻，幂等） */
+let tokenCaptureStarted = false
 export function startChatgptTokenCapture(target: Session = session.defaultSession): void {
+  // 幂等：重复调用会在同一 session 上叠加 onBeforeSendHeaders 监听器
+  if (tokenCaptureStarted) return
+  tokenCaptureStarted = true
   target.webRequest.onBeforeSendHeaders((details, callback) => {
     const auth = details.requestHeaders['Authorization'] || details.requestHeaders['authorization']
     if (auth && typeof auth === 'string' && auth.startsWith('Bearer ') && /chatgpt\.com|chat\.openai\.com/.test(details.url)) {

@@ -288,7 +288,14 @@ export const CHAT_FETCH_HOOK_SCRIPT = `
           id: genUuid(),
           author: { role: 'system', name: null, metadata: {} },
           create_time: Date.now() / 1000,
+          update_time: Date.now() / 1000,
           content: { content_type: 'text', parts: [projectText] },
+          status: 'finished_successfully',
+          end_turn: null,
+          weight: 1,
+          recipient: 'all',
+          channel: null,
+          metadata: {},
         });
         window.__freehubInjectedConvs[convKey] = true;
         // 调试：把注入内容打印到 ChatGPT 视图控制台（F12 打开 DevTools 查看）
@@ -395,7 +402,14 @@ export const CHAT_FETCH_HOOK_SCRIPT = `
           id: genUuid(),
           author: { role: 'system', name: null, metadata: {} },
           create_time: Date.now() / 1000,
+          update_time: Date.now() / 1000,
           content: { content_type: 'text', parts: [text] },
+          status: 'finished_successfully',
+          end_turn: null,
+          weight: 1,
+          recipient: 'all',
+          channel: null,
+          metadata: {},
         });
         changed = true;
       }

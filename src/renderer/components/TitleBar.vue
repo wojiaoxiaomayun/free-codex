@@ -243,11 +243,10 @@ function openProjectPalette(): void {
 }
 
 onMounted(async () => {
-  maximized.value = await windowControls.isMaximized()
+  // 订阅先行：即使初始化查询失败，标题栏仍能收到实时推送
   unsubscribe = windowControls.onMaximizedChange((value) => {
     maximized.value = value
   })
-  activeProject.value = await window.freeCodex.projects.get()
   // 项目在 overlay 面板里被激活后，主进程推送 project:changed 刷新标题栏
   unsubscribeProjectChanged = window.freeCodex.onProjectChanged((state) => {
     activeProject.value = state as ProjectState
@@ -256,11 +255,14 @@ onMounted(async () => {
   unsubscribeTunnelStatus = window.freeCodex.onTunnelStatus((status) => {
     tunnelStatus.value = status as TunnelStatus
   })
-  void refreshTunnelStatus()
   // 右上角插件状态：订阅主进程推送（主进程 30s 轮询 + 安装/登录后即时推）
   unsubscribePluginStatus = window.freeCodex.onPluginStatus((status) => {
     pluginStatus.value = status as PluginStatus
   })
+  // 初始化查询：各自兜底，失败不阻塞其余
+  await windowControls.isMaximized().then((v) => { maximized.value = v }).catch(() => undefined)
+  await window.freeCodex.projects.get().then((s) => { activeProject.value = s as ProjectState }).catch(() => undefined)
+  void refreshTunnelStatus().catch(() => undefined)
   // 启动时应用当前主题到 ChatGPT 页面（ChatGPT 视图可能已打开）
   window.freeCodex.setTheme(isDark.value).catch(() => undefined)
 })

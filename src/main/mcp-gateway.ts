@@ -6,6 +6,11 @@ import type { RunningHttpServer } from '@meesii/codex-mcp/dist/server/http-serve
 import type { UserConfig } from '@meesii/codex-mcp/dist/config/user-config.js'
 import type { McpServerConfig, UiPreferences } from './config'
 import { captureBefore, createDiffRecord, DIFF_CAPABLE_TOOLS, type FileDiffRecord } from './file-diffs'
+import {
+  ToolTracker,
+  type ToolCallRecord,
+  type ToolCallSnapshot,
+} from './gateway/tool-tracker'
 
 /**
  * codex-mcp 运行时模块（宽松类型）。
@@ -115,35 +120,6 @@ export type GatewayEvent = {
   at: number
 }
 
-/** 单次工具调用记录（按 MCP 会话分组，区分 ChatGPT 不同对话） */
-export type ToolCallStatus = 'pending' | 'ok' | 'error'
-export type ToolCallRecord = {
-  /** 全局自增序号（列表 key 用） */
-  id: number
-  /** MCP 会话标识（请求头 mcp-session-id，缺失时回退到会话类请求头） */
-  sessionId: string
-  /** 工具名（短名，去掉服务器前缀） */
-  tool: string
-  /** 调用参数键 */
-  argsKeys: string[]
-  /** 完整调用参数（UI 折叠展示，可能较大） */
-  args?: Record<string, unknown>
-  /** 发起时间戳 */
-  at: number
-  status: ToolCallStatus
-  /** 从发起响应的耗时（ms，响应后才有） */
-  durationMs?: number
-  /** 工具返回结果（成功时）或错误详情（失败时），UI 折叠展示 */
-  result?: unknown
-}
-
-/** 工具调用快照（getToolCalls 返回；sessionId → 该会话的全部调用，最新在前） */
-export type ToolCallSnapshot = {
-  sessions: Record<string, ToolCallRecord[]>
-  /** 全量平铺（最新在前，上限 TOOL_CALLS_TOTAL） */
-  recent: ToolCallRecord[]
-}
-
 /** 从 MCP 请求解析会话标识（ChatGPT 每个对话一条 MCP 连接，mcp-session-id 即区分键） */
 function sessionKeyFor(req: { headers: Record<string, string | string[] | undefined> }): string {
   const h = req.headers
@@ -244,26 +220,12 @@ export class NodeMcpGateway {
   private hub?: DownstreamHubLike
   private events = new Set<(event: GatewayEvent) => void>()
   private fileDiffListeners = new Set<(record: FileDiffRecord) => void>()
-  private toolCallListeners = new Set<(record: ToolCallRecord, direction: 'start' | 'done') => void>()
+  private toolTracker = new ToolTracker()
   private currentConfig?: GatewayConfig
 
   /** 内置引擎工具缓存（带 TTL） */
   private builtinToolsCache: { tools: { name: string; description: string; server: string }[]; at: number } | null = null
   private readonly BUILTIN_CACHE_TTL_MS = 30_000
-
-  // ---------- 工具调用记录（按 MCP 会话分组）----------
-  /** sessionId → 调用列表（最新在前，每个会话上限 TOOL_CALLS_PER_SESSION） */
-  private toolCallsBySession = new Map<string, ToolCallRecord[]>()
-  /** sessionId → 最近活动时间（超出会话数上限时淘汰最久未活跃的） */
-  private sessionLastAt = new Map<string, number>()
-  /** JSON-RPC id → 调用记录（响应到达时回填 status/duration） */
-  private toolCallById = new Map<unknown, ToolCallRecord>()
-  private toolCallSeq = 0
-  private readonly TOOL_CALLS_PER_SESSION = 100
-  private readonly TOOL_CALLS_MAX_SESSIONS = 24
-  private readonly TOOL_CALLS_TOTAL = 200
-  /** pending 记录超过该时长视为超时（推送快照时清理，避免"运行中"挂死） */
-  private readonly PENDING_TIMEOUT_MS = 5 * 60_000
 
   constructor(
     private config: GatewayConfig,
@@ -342,67 +304,12 @@ export class NodeMcpGateway {
 
   /** 订阅工具调用（发起 start / 完成 done），用于实时推送渲染层 */
   onToolCall(listener: (record: ToolCallRecord, direction: 'start' | 'done') => void) {
-    this.toolCallListeners.add(listener)
-    return () => this.toolCallListeners.delete(listener)
+    return this.toolTracker.on(listener)
   }
 
   /** 工具调用快照（按会话分组 + 全量平铺），渲染层按当前会话过滤展示 */
   getToolCalls(): ToolCallSnapshot {
-    // 超时的 pending 视为 error（abort/超时不会再有响应）
-    const now = Date.now()
-    for (const list of this.toolCallsBySession.values()) {
-      for (let i = list.length - 1; i >= 0; i--) {
-        const rec = list[i]
-        if (rec.status === 'pending' && now - rec.at > this.PENDING_TIMEOUT_MS) rec.status = 'error'
-      }
-    }
-    const sessions: Record<string, ToolCallRecord[]> = {}
-    const recent: ToolCallRecord[] = []
-    for (const [sid, list] of this.toolCallsBySession) sessions[sid] = list
-    for (const list of Object.values(sessions)) recent.push(...list)
-    recent.sort((a, b) => b.at - a.at)
-    return { sessions, recent: recent.slice(0, this.TOOL_CALLS_TOTAL) }
-  }
-
-  /** 记录一次工具调用发起（响应到达时经 toolCallById 回填状态） */
-  private pushToolCall(record: ToolCallRecord) {
-    const list = this.toolCallsBySession.get(record.sessionId) ?? []
-    list.unshift(record)
-    if (list.length > this.TOOL_CALLS_PER_SESSION) list.length = this.TOOL_CALLS_PER_SESSION
-    this.toolCallsBySession.set(record.sessionId, list)
-    this.sessionLastAt.set(record.sessionId, record.at)
-    // 会话数上限：淘汰最久未活跃的会话
-    if (this.toolCallsBySession.size > this.TOOL_CALLS_MAX_SESSIONS) {
-      let oldest: string | null = null
-      let oldestAt = Infinity
-      for (const [sid, at] of this.sessionLastAt) {
-        if (at < oldestAt) {
-          oldestAt = at
-          oldest = sid
-        }
-      }
-      if (oldest) {
-        this.toolCallsBySession.delete(oldest)
-        this.sessionLastAt.delete(oldest)
-      }
-    }
-    for (const listener of this.toolCallListeners) {
-      try {
-        listener(record, 'start')
-      } catch (err) {
-        console.warn('[gateway] toolCall 监听器异常:', err)
-      }
-    }
-  }
-
-  private emitToolCallDone(record: ToolCallRecord) {
-    for (const listener of this.toolCallListeners) {
-      try {
-        listener(record, 'done')
-      } catch (err) {
-        console.warn('[gateway] toolCall 监听器异常:', err)
-      }
-    }
+    return this.toolTracker.snapshot()
   }
 
   get endpoint() {
@@ -457,7 +364,19 @@ export class NodeMcpGateway {
     return { ready, error }
   }
 
+  /** 并发去重：多个调用方同时 start 只建一个 HTTP server（重复 start 会覆盖 this.server，旧实例永不关闭） */
+  private startPromise?: Promise<string>
+
   async start() {
+    if (this.server) return this.publicUrl || this.endpoint
+    if (this.startPromise) return this.startPromise
+    this.startPromise = this.startInternal().finally(() => {
+      this.startPromise = undefined
+    })
+    return this.startPromise
+  }
+
+  private async startInternal() {
     if (this.server) return this.publicUrl || this.endpoint
 
     const modules = await loadCodexMcp()
@@ -544,9 +463,7 @@ export class NodeMcpGateway {
     this.hub = undefined
     this.currentConfig = undefined
     this.builtinToolsCache = null
-    this.toolCallsBySession.clear()
-    this.sessionLastAt.clear()
-    this.toolCallById.clear()
+    this.toolTracker.clear()
     this.emit('system', 'gateway_stopped')
   }
 
@@ -556,15 +473,28 @@ export class NodeMcpGateway {
 
   private attachRequestSniffer(httpServer: NodeHttpServer) {
     // JSON-RPC id → 待匹配的工具调用上下文
+    // 每个 SSE/http 连接独立维护，避免某个客户端断开误清理其它会话的 pending。
     const pending = new Map<unknown, { toolName: string; relPath: string; absPath: string; before: string | null }>()
 
     httpServer.on('request', (req, res) => {
+      const connectionPendingIds = new Set<unknown>()
       if (!req.url || !req.url.includes('/mcp')) return
 
       // 请求体：tools/call 参数（执行前快照）
       const reqChunks: Buffer[] = []
-      req.on('data', (chunk: Buffer) => reqChunks.push(chunk))
+      let reqBytes = 0
+      let oversized = false
+      const MAX_REQ_BODY = 1024 * 1024 // 1MB：防超大请求体把主进程内存打爆
+      req.on('data', (chunk: Buffer) => {
+        reqBytes += chunk.length
+        if (reqBytes > MAX_REQ_BODY) {
+          oversized = true
+          return
+        }
+        reqChunks.push(chunk)
+      })
       req.on('end', () => {
+        if (oversized) return // 超大请求体：不记录调用（引擎仍正常处理）
         try {
           const body = Buffer.concat(reqChunks).toString('utf8')
           const msg = JSON.parse(body) as { id?: unknown; method?: string; params?: { name?: string; arguments?: Record<string, unknown> } }
@@ -587,19 +517,23 @@ export class NodeMcpGateway {
           if (msg && msg.method === 'tools/call') {
             // 记录本次调用（会话级分组；响应到达时回填 status / result）
             const args = msg.params?.arguments ? { ...msg.params.arguments } : undefined
-            const record: ToolCallRecord = {
-              id: ++this.toolCallSeq,
+            const record = this.toolTracker.start(msg.id, {
               sessionId: sessionKeyFor(req),
               tool: shortToolName(msg.params?.name ?? ''),
               argsKeys: args ? Object.keys(args) : [],
               args,
               at: Date.now(),
               status: 'pending',
-            }
-            this.toolCallById.set(msg.id, record)
-            this.pushToolCall(record)
+            })
             const ctx = this.buildToolCtx(msg.params?.name ?? '', msg.params?.arguments ?? {})
-            if (ctx) pending.set(msg.id, ctx)
+            if (ctx) {
+              pending.set(msg.id, ctx)
+              connectionPendingIds.add(msg.id)
+              if (pending.size > 200) {
+                const oldest = pending.keys().next().value
+                if (oldest !== undefined) pending.delete(oldest)
+              }
+            }
           }
         } catch {
           // 非 JSON 请求体忽略
@@ -624,14 +558,7 @@ export class NodeMcpGateway {
         }
         resText = consumeJsonRpcResponses(resText + text, (resp) => {
           // 工具调用状态回填（ok / error）+ 结果 + 完成事件
-          const call = this.toolCallById.get(resp.id)
-          if (call) {
-            call.status = resp.error ? 'error' : 'ok'
-            call.durationMs = Date.now() - call.at
-            call.result = resp.error ?? resp.result
-            this.toolCallById.delete(resp.id)
-            this.emitToolCallDone(call)
-          }
+          this.toolTracker.done(resp.id, resp.result, resp.error)
           const ctx = pending.get(resp.id)
           if (!ctx) return
           pending.delete(resp.id)
@@ -650,6 +577,14 @@ export class NodeMcpGateway {
         handleChunk(chunk)
         return originalEnd(chunk as never, ...(args as never[]))
       }) as typeof res.end
+      // SSE 长连接断开（客户端中断/会话结束）：挂起的调用永远不会回填 → 清掉避免泄漏
+      res.on('close', () => {
+        // 只清理当前连接创建的 pending，避免一个 SSE 客户端断开影响其它会话。
+        for (const id of connectionPendingIds) {
+          pending.delete(id)
+        }
+        connectionPendingIds.clear()
+      })
     })
   }
 
@@ -666,8 +601,16 @@ export class NodeMcpGateway {
       if (m) relPath = m[1].trim()
     }
     if (!relPath) return null
-    const absPath = path.isAbsolute(relPath) ? relPath : path.join(this.config.projectRoot, relPath)
-    const cleanRel = path.isAbsolute(relPath) ? path.basename(relPath) : relPath
+    // 安全约束：路径必须是项目目录内的文件。快照读取（captureBefore）与撤回写回（revertFile/undoHunk）
+    // 都基于 absPath，不能信任请求侧路径 —— 绝对路径、../ 逃逸会越出 projectRoot 读写任意文件。
+    const projectRoot = path.resolve(this.config.projectRoot || '.')
+    const absPath = path.resolve(projectRoot, relPath)
+    const rel = path.relative(projectRoot, absPath)
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      console.warn(`[gateway] 忽略项目目录外的 diff 路径: ${relPath}`)
+      return null
+    }
+    const cleanRel = rel || path.basename(absPath)
     return { toolName: name, relPath: cleanRel, absPath, before: captureBefore(absPath) }
   }
 
@@ -688,7 +631,14 @@ export class NodeMcpGateway {
 
   private emit(direction: GatewayEvent['direction'], method: string, payload?: unknown) {
     const event: GatewayEvent = { direction, method, payload, at: Date.now() }
-    for (const listener of this.events) listener(event)
+    for (const listener of this.events) {
+      try {
+        listener(event)
+      } catch (err) {
+        // 监听器异常不能中断 stop/reloadDownstream 等流程
+        console.warn('[gateway] 事件监听器异常:', err)
+      }
+    }
   }
 }
 

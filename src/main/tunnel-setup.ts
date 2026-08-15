@@ -335,14 +335,24 @@ export class TunnelSetupCoordinator {
       // 与 runCloudflared 一致的环境（HOME/USERPROFILE 指向 managed 目录），登录凭据落到 --origincert 同路径
       const child = spawn(bin, ['tunnel', 'login'], { windowsHide: true, env: modules.exec.cloudflaredChildEnv() })
       this.loginChild = child
+      // 登录超时兜底：用户放弃浏览器授权时 child 一直挂着 → 向导卡死（cancel() 是唯一的退出路径）
+      const loginTimeout = setTimeout(() => {
+        this.loginChild = undefined
+        try { child.kill() } catch { /* 已退出 */ }
+        reject(new Error('Cloudflare 登录超时（5 分钟），请重试'))
+      }, 5 * 60_000)
       const forward = (chunk: Buffer) => {
         const line = chunk.toString('utf8').trim()
         if (line) this.progress('login', 'info', line)
       }
       child.stdout?.on('data', forward)
       child.stderr?.on('data', forward)
-      child.on('error', reject)
+      child.on('error', (err) => {
+        clearTimeout(loginTimeout)
+        reject(err)
+      })
       child.on('close', (code) => {
+        clearTimeout(loginTimeout)
         this.loginChild = undefined
         if (code !== 0 || !existsSync(certPath)) {
           reject(new Error('Cloudflare 登录没有完成，请重试'))

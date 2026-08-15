@@ -330,8 +330,16 @@ export class TodosServer {
     })
     await new Promise<void>((resolve, reject) => {
       const srv = this.httpServer!
-      srv.once('error', reject)
+      const onListenError = (err: Error) => {
+        // 启动失败 → 清掉引用，否则 running 误报 true 且后续 start() 被 no-op
+        this.httpServer = undefined
+        this.port = 0
+        reject(err)
+      }
+      srv.once('error', onListenError)
       srv.listen(0, '127.0.0.1', () => {
+        // listen 成功后摘掉 error 监听：防止运行期误触发 error 时清掉仍在服务的服务器状态
+        srv.removeListener('error', onListenError)
         this.port = (srv.address() as AddressInfo).port
         console.log('[todos] todos server 已启动:', this.endpoint)
         resolve()
@@ -344,6 +352,8 @@ export class TodosServer {
     this.httpServer = undefined
     this.port = 0
     if (srv) {
+      // closeAllConnections：keep-alive 长连接不关闭时 srv.close 会一直等待 → 退出卡住
+      srv.closeAllConnections()
       await new Promise<void>((resolve) => srv.close(() => resolve()))
     }
   }

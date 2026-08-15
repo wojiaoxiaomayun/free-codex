@@ -24,6 +24,8 @@ pnpm-debug.log*
 *.jpeg
 *.gif
 *.webp
+# 但应用图标（electron-builder 资源）需要入库
+!build/icon.png
 
 # Environment / secrets (keep the example file if one is added later)
 .env

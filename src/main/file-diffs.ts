@@ -293,9 +293,12 @@ function revertHunk(
   return { ok: false, error: '无法定位该段变更，文件可能已被后续修改' }
 }
 
-/** 写回撤销结果：原本不存在的文件若结果为空则删除，否则写入内容（保留换行风格） */
-function writeResult(absPath: string, lines: string[], eol: string, existed: boolean): void {
-  if (!existed && lines.join(eol) === '') {
+/** 写回撤销结果：原本不存在的文件若结果为空则删除，否则写入内容（保留换行风格与末尾换行） */
+function writeResult(absPath: string, lines: string[], eol: string, existed: boolean, trailingEol: boolean): void {
+  const text = lines.join(eol)
+  // split/join 或 hunk 替换可能丢掉末尾换行 → 原文件以换行结尾时补回
+  const finalText = trailingEol && !text.endsWith(eol) ? text + eol : text
+  if (!existed && finalText === '') {
     try {
       rmSync(absPath, { force: true })
     } catch {
@@ -303,7 +306,7 @@ function writeResult(absPath: string, lines: string[], eol: string, existed: boo
     }
     return
   }
-  writeFileSync(absPath, lines.join(eol), 'utf8')
+  writeFileSync(absPath, finalText, 'utf8')
 }
 
 /** 整段撤销结果（diff 为 null 表示该文件已完全恢复原状，应移除记录） */
@@ -341,13 +344,14 @@ export function undoHunk(id: string, hunkIndex: number): DiffHunkUndoResult {
     return { ok: false, error: '文件读取失败或已被删除' }
   }
   const eol = raw.includes('\r\n') ? '\r\n' : '\n'
+  const trailingEol = /(?:\r\n|\n)$/.test(raw)
   const lines = raw.split(/\r?\n/)
 
   const applied = revertHunk(lines, hunk)
   if (!applied.ok) return { ok: false, error: applied.error }
 
   try {
-    writeResult(record.absPath, applied.lines, eol, record.before === null)
+    writeResult(record.absPath, applied.lines, eol, record.before === null, trailingEol)
   } catch (err) {
     return { ok: false, error: `文件写入失败: ${err instanceof Error ? err.message : String(err)}` }
   }

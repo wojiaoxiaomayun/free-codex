@@ -36,8 +36,9 @@
 - [x] `npm start` 冒烟启动通过；当前环境只出现 Electron cache/GPU cache 权限警告，没有再出现 ESM 加载崩溃。
 - [ ] 完成真实 ChatGPT Remote MCP OAuth 登录/授权验证。
 - [ ] 完成 Cloudflare Named Tunnel 公网端到端验证。
-- [ ] 完善 Tool 调用拦截、Diff / Permission UI 和更细粒度 Logs。
-- [ ] 完成打包安装包验证。
+- [x] Tool 调用拦截（Tools 面板实时记录、按会话归属）、Diff UI（整段撤销/撤回/确认）、实时 Logs 已完成。
+- [ ] Permission UI（引擎权限审批弹窗 + 授权管理）未集成：codex-mcp PermissionManager 以空配置创建，无审批界面。
+- [x] 打包安装包验证：release/Free Codex-0.1.0-Setup.exe 已产出，npm run dist:dir 构建链路验证通过。
 
 ## 约束
 - 本项目不启用 Goal 模式。

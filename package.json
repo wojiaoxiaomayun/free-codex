@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "description": "Electron + Vue desktop shell for ChatGPT with the native Node.js codex-mcp gateway.",
+  "author": "free-codex contributors",
+  "engines": {
+    "node": ">=22"
+  },
   "main": "dist-electron/main/index.js",
   "scripts": {
     "dev": "vite",
@@ -59,10 +63,14 @@
       "dist-electron/**/*",
       "package.json"
     ],
+    "asarUnpack": [
+      "**/node_modules/@node-rs/**"
+    ],
     "win": {
       "target": [
         "nsis"
       ],
+      "icon": "build/icon.png",
       "artifactName": "${productName}-${version}-Setup.${ext}"
     }
   }

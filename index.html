@@ -1,1 +1,23 @@
-<!doctype html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Free Codex</title></head><body><div id="app"></div><script type="module" src="/src/renderer/main.ts"></script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="description" content="Free Codex - ChatGPT 桌面工作台 + 本地 codex-mcp 网关" />
+    <!-- 本地渲染层 CSP（ChatGPT 远程内容在独立 WebContentsView 中加载，不受此策略影响）；
+         style-src 'unsafe-inline' 与 connect-src ws: 兼容 Vite dev HMR -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'"
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%233b82f6'/%3E%3Ctext x='16' y='22' font-family='Consolas,monospace' font-size='14' font-weight='bold' fill='white' text-anchor='middle'%3E%26lt;/%26gt;%3C/text%3E%3C/svg%3E"
+    />
+    <title>Free Codex</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/renderer/main.ts"></script>
+  </body>
+</html>

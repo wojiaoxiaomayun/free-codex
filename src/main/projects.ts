@@ -77,7 +77,10 @@ function readProjects(): ProjectState {
           // 迁移成功 → 清掉旧文件与空目录，保持单一位置
           try {
             rmSync(legacy, { force: true })
-            rmSync(dirname(legacy), { recursive: true, force: true })
+            // 只删 projects.json；旧目录若已空则一并移除，非空（可能有其他数据）则保留
+            try {
+              rmSync(dirname(legacy), { force: true })
+            } catch { /* 目录非空或不存在 → 保留 */ }
           } catch {
             /* 清理旧文件失败不影响使用 */
           }

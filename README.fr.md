@@ -95,6 +95,12 @@ free-codex/
 └── package.json
 ```
 
+## Configuration requise
+
+- Windows 10+ (cible d'empaquetage actuelle : Windows)
+- Environnement de développement : Node.js >= 22 (exigé par le moteur codex-mcp)
+- L'application empaquetée tourne sur le Node intégré d'Electron (Electron 32 embarque Node 20 ; passer à Electron >= 35 pour satisfaire pleinement l'exigence Node 22 du moteur)
+
 ## Développement
 
 Installer les dépendances :

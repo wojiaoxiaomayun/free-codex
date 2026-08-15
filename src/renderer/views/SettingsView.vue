@@ -1101,10 +1101,14 @@ async function setUi(key: 'tools' | 'status', value: boolean): Promise<void> {
 async function applyProxy(): Promise<void> {
   if (!config.value) return
   try {
-    await window.freeCodex.applyProxy({
+    const r = await window.freeCodex.applyProxy({
       enabled: config.value.proxy.enabled,
       url: config.value.proxy.url,
     })
+    if (!r?.ok) {
+      toast.error('应用代理失败')
+      return
+    }
     toast.success('代理已应用', { description: 'ChatGPT 页面已刷新' })
   } catch (e) {
     toast.error('应用代理失败', { description: e instanceof Error ? e.message : String(e) })
@@ -1136,7 +1140,13 @@ async function toggleTool(name: string, enabled: boolean): Promise<void> {
     const r = await window.freeCodex.toolEnablement.save(next)
     disabledTools.value = r.disabledTools ?? next
     toast.success(enabled ? `已启用 ${name}` : `已禁用 ${name}`, {
-      description: r.restarted ? '网关已重启，ChatGPT 连接器将不再暴露该工具' : r.restartError ? `网关重启失败：${r.restartError}` : '网关未运行，下次启动生效',
+      description: r.restarted
+        ? enabled
+          ? '网关已重启，该工具已重新暴露给 ChatGPT'
+          : '网关已重启，ChatGPT 连接器将不再暴露该工具'
+        : r.restartError
+          ? `网关重启失败：${r.restartError}`
+          : '网关未运行，下次启动生效',
     })
     await refreshGateway()
   } catch (err) {
@@ -1878,17 +1888,21 @@ function shortAppId(id?: string): string {
 let pluginTimer: ReturnType<typeof setInterval> | undefined
 
 onMounted(async () => {
-  config.value = await window.freeCodex.getConfig()
-  await refreshMcp()
-  await refreshSkills()
-  await loadToolEnablement() // 先加载禁用列表，refreshGateway 合并显示被禁用的工具
-  await refreshGateway()
-  await refreshAuth()
+  // 各加载独立兜底：单个 IPC 失败不把整个设置页刷白（此前任一 await 抛错会跳过全部后续加载）
+  await window.freeCodex
+    .getConfig()
+    .then((c) => { config.value = c })
+    .catch(() => toast.error('读取配置失败'))
+  await refreshMcp().catch(() => toast.error('读取 MCP 服务器失败'))
+  await refreshSkills().catch(() => toast.error('读取技能失败'))
+  await loadToolEnablement().catch(() => undefined) // 先加载禁用列表，refreshGateway 合并显示被禁用的工具
+  await refreshGateway().catch(() => undefined)
+  await refreshAuth().catch(() => undefined)
   // 先确认登录，已登录才拉开发者模式/插件状态
-  await refreshLogin()
+  await refreshLogin().catch(() => undefined)
   if (loginState.value?.loggedIn) {
-    void refreshDevMode()
-    void refreshPlugin()
+    void refreshDevMode().catch(() => undefined)
+    void refreshPlugin().catch(() => undefined)
   }
   if (!pluginTimer) {
     pluginTimer = setInterval(() => void silentRefreshPlugin(), 600_000)
@@ -1900,6 +1914,11 @@ onUnmounted(() => {
   if (pluginTimer) {
     clearInterval(pluginTimer)
     pluginTimer = undefined
+  }
+  // 向导监听器泄漏：页面卸载时若有进行中的向导（主进程 tunnel:setup 仍在跑），先取消再清理监听
+  if (tunnelWizardOpen.value) {
+    if (tunnelPhase.value === 'running') void cancelTunnelSetup()
+    closeTunnelWizard()
   }
 })
 </script>

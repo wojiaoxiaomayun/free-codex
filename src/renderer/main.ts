@@ -1,5 +1,4 @@
 import { createApp } from 'vue'
-import { createPinia } from 'pinia'
 import { createRouter, createWebHashHistory } from 'vue-router'
 import './styles/globals.css'
 import 'vue-sonner/style.css'
@@ -31,6 +30,5 @@ const router = createRouter({
 })
 
 const app = createApp(App)
-app.use(createPinia())
 app.use(router)
 app.mount('#app')

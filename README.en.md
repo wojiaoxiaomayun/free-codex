@@ -95,6 +95,12 @@ free-codex/
 └── package.json
 ```
 
+## Requirements
+
+- Windows 10+ (current packaging target is Windows)
+- Development environment: Node.js >= 22 (required by the codex-mcp engine)
+- The packaged app runs on Electron's bundled Node (Electron 32 bundles Node 20; upgrade to Electron >= 35 to fully satisfy the engine's Node 22 requirement)
+
 ## Development
 
 Install dependencies:

@@ -95,6 +95,12 @@ free-codex/
 └── package.json
 ```
 
+## 环境要求
+
+- Windows 10+（当前打包目标为 Windows）
+- 开发环境：Node.js >= 22（codex-mcp 引擎要求）
+- 打包后的应用运行在 Electron 内置 Node 上（Electron 32 内置 Node 20；后续升级 Electron >= 35 以完全满足引擎的 Node 22 要求）
+
 ## 开发
 
 安装依赖：

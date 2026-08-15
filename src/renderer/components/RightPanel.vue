@@ -162,7 +162,25 @@
             <span class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
               文件变更
             </span>
-            <Badge variant="secondary" class="text-[10px]">{{ diffs.length }}</Badge>
+            <div class="flex items-center gap-1">
+              <button
+                class="rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-40"
+                :disabled="!diffs.length"
+                title="全部撤回：所有文件恢复到修改前内容"
+                @click="revertAllDiffs"
+              >
+                全部撤回
+              </button>
+              <button
+                class="rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-40"
+                :disabled="!diffs.length"
+                title="全部同意：接受所有文件当前内容"
+                @click="confirmAllDiffs"
+              >
+                全部同意
+              </button>
+              <Badge variant="secondary" class="text-[10px]">{{ diffs.length }}</Badge>
+            </div>
           </div>
 
           <div v-if="!diffs.length" class="flex flex-col items-center gap-2 py-10 text-center">
@@ -976,18 +994,56 @@ async function revertDiff(d: FileDiffRecord): Promise<void> {
 }
 
 async function confirmDiff(d: FileDiffRecord): Promise<void> {
-  await window.freeCodex.confirmDiffFile(d.id)
+  const result = await window.freeCodex.confirmDiffFile(d.id)
+  if (!result.ok) {
+    alert(result.error ?? '确认变更失败')
+    return
+  }
   removeDiff(d.id)
 }
 
+/** 批量执行 diff 操作：逐个处理，失败不中断其余（成功项同步移出列表），返回失败摘要 */
+async function runBatchDiffOps(
+  label: string,
+  ops: Array<{ id: string; run: () => Promise<{ ok: boolean; error?: string }> }>,
+): Promise<string[]> {
+  const failures: string[] = []
+  for (const op of ops) {
+    try {
+      const result = await op.run()
+      if (!result.ok) {
+        failures.push(`${label}失败: ${result.error ?? '未知错误'}`)
+      } else {
+        removeDiff(op.id)
+      }
+    } catch (err) {
+      failures.push(`${label}失败: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+  return failures
+}
+
+async function revertAllDiffs(): Promise<void> {
+  if (!diffs.value.length) return
+  if (!confirm(`确定全部撤回 ${diffs.value.length} 个文件到修改前内容？`)) return
+  const failures = await runBatchDiffOps(
+    '撤回',
+    diffs.value.map((d) => ({ id: d.id, run: () => window.freeCodex.revertDiffFile(d.id) })),
+  )
+  if (failures.length) alert(`部分文件撤回失败：\n${failures.join('\n')}`)
+}
+
+async function confirmAllDiffs(): Promise<void> {
+  if (!diffs.value.length) return
+  const failures = await runBatchDiffOps(
+    '确认',
+    diffs.value.map((d) => ({ id: d.id, run: () => window.freeCodex.confirmDiffFile(d.id) })),
+  )
+  if (failures.length) alert(`部分文件确认失败：\n${failures.join('\n')}`)
+}
+
 onMounted(async () => {
-  await window.freeCodex.setPanelCollapsed(collapsed.value)
-  await refreshTools()
-  await refreshToolCalls()
-  await loadInjectionState()
-  await loadCleanup()
-  await loadTodos()
-  diffs.value = await window.freeCodex.listDiffs()
+  // 订阅先行：即使初始化加载失败，面板仍能收到实时推送
   removeEvents = window.freeCodex.onMcpEvent((event) => {
     log(event.payload ? `${event.method}: ${JSON.stringify(event.payload)}` : event.method)
     void refreshTools()
@@ -1016,6 +1072,20 @@ onMounted(async () => {
   }, 5000)
   // 兜底：面板挂载早于网关启动完成时（错过 gateway_started 事件），延迟一次刷新静态工具列表
   mountRefreshTimer = setTimeout(() => void refreshTools(), 2000)
+
+  // 初始化加载：各自兜底，单个失败不阻塞其余（订阅已先行注册，不会出现"面板死了"）
+  const guarded = <T,>(p: Promise<T>): Promise<T | undefined> => p.catch((err) => {
+    log(err instanceof Error ? err.message : String(err), 'error')
+    return undefined
+  })
+  await guarded(window.freeCodex.setPanelCollapsed(collapsed.value))
+  await guarded(refreshTools())
+  await guarded(refreshToolCalls())
+  await guarded(loadInjectionState())
+  await guarded(loadCleanup())
+  await guarded(loadTodos())
+  const loadedDiffs = await guarded(window.freeCodex.listDiffs())
+  if (loadedDiffs) diffs.value = loadedDiffs
 })
 
 onUnmounted(() => {

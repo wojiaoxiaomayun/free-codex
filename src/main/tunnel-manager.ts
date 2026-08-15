@@ -49,6 +49,8 @@ export class TunnelManager {
   private sidecar?: CloudflaredTunnelLike
   private modules?: TunnelModules
   private busy: Promise<{ ok: boolean; message: string }> | null = null
+  /** stop() 后置位：进行中的 ensure 不得再拉起/保留 sidecar */
+  private stopped = false
 
   constructor(private readonly opts: TunnelManagerOptions) {}
 
@@ -85,6 +87,9 @@ export class TunnelManager {
   }
 
   private async runEnsure(): Promise<{ ok: boolean; message: string }> {
+    // 新一次 ensure 视为实例仍在用：允许 stop() 后重新拉起隧道；
+    // stop() 与进行中 ensure 的竞态仍由启动完成后的 stopped 检查拦截
+    this.stopped = false
     const modules = (this.modules ??= await loadTunnelModules())
     const probe = this.opts.getProbe()
     const publicUrl = `https://${this.opts.domain}/mcp`
@@ -107,6 +112,11 @@ export class TunnelManager {
         mirrorLogs: false,
       })
       await this.sidecar.start()
+      // stop() 与 ensure() 并发：启动完成后若已请求停止，立即回收，不再继续验证/保留
+      if (this.stopped) {
+        await this.stopSidecar()
+        return { ok: false, message: '隧道已停止' }
+      }
       console.log('[tunnel] cloudflared 已启动')
     } catch (err) {
       this.sidecar = undefined
@@ -145,6 +155,7 @@ export class TunnelManager {
   }
 
   async stop(): Promise<void> {
+    this.stopped = true
     await this.stopSidecar()
     this.modules = undefined
   }
