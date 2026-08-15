@@ -334,5 +334,19 @@ export function exposeFreeCodexApi(): void {
       /** 取消当前搜索 */
       cancel: (): Promise<void> => ipcRenderer.invoke('search:cancel'),
     },
+
+    // ---------- 底部终端（termView + node-pty）----------
+    terminal: {
+      /** 切换终端面板（可强制开/关），返回切换后的可见状态 */
+      toggle: (force?: boolean): Promise<boolean> => ipcRenderer.invoke('term:toggle', force),
+      /** 当前终端面板可见状态 */
+      visible: (): Promise<boolean> => ipcRenderer.invoke('term:visible'),
+      /** 订阅终端面板可见状态变化（TitleBar 按钮高亮同步），返回取消订阅函数 */
+      onVisible: (cb: (visible: boolean) => void): (() => void) => {
+        const listener = (_event: Electron.IpcRendererEvent, value: boolean) => cb(value)
+        ipcRenderer.on('term:visible', listener)
+        return () => ipcRenderer.removeListener('term:visible', listener)
+      },
+    },
   })
 }

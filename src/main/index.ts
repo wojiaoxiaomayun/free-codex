@@ -16,6 +16,8 @@ import { createProjectManager, type ProjectManager } from './projects'
 import { listProjectFiles } from './project-files'
 import { readProjectFile, writeProjectFile, openFileExternally } from './file-viewer'
 import { runSearch, cancelSearch } from './search'
+import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, terminalAlive } from './terminal'
+import { homedir } from 'node:os'
 import { listDiffRecords, revertFile, confirmFile, undoHunk } from './file-diffs'
 import {
   startChatgptTokenCapture,
@@ -48,9 +50,15 @@ applyUserAgentFallback()
 const TITLEBAR_HEIGHT = 36
 const PANEL_WIDTH = 348
 const PANEL_RAIL = 40
+/** 底部终端默认高度 */
+const TERM_HEIGHT = 240
+/** 终端面板是否可见（TitleBar 按钮 / Ctrl+` 切换） */
+let terminalVisible = false
 const CHATGPT_URL = 'https://chatgpt.com/'
 let win: BrowserWindow | undefined
 let chatView: WebContentsView | undefined
+/** 底部终端视图（xterm 页面；独立 WebContentsView，位于 chatView 下方） */
+let termView: WebContentsView | undefined
 let overlayWin: BrowserWindow | undefined
 let config: Config
 let gateway: NodeMcpGateway
@@ -258,7 +266,15 @@ function layout() {
   if (!win || !chatView) return
   const [width, height] = win.getContentSize()
   const right = panelCollapsed ? PANEL_RAIL : PANEL_WIDTH
-  chatView.setBounds({ x: 0, y: TITLEBAR_HEIGHT, width: Math.max(0, width - right), height: Math.max(0, height - TITLEBAR_HEIGHT) })
+  const areaW = Math.max(0, width - right)
+  const areaH = Math.max(0, height - TITLEBAR_HEIGHT)
+  // 底部终端可见时，chatView 上移让出 TERM_HEIGHT
+  const termH = terminalVisible ? Math.min(TERM_HEIGHT, Math.max(120, areaH - 120)) : 0
+  chatView.setBounds({ x: 0, y: TITLEBAR_HEIGHT, width: areaW, height: Math.max(0, areaH - termH) })
+  if (termView) {
+    termView.setBounds({ x: 0, y: TITLEBAR_HEIGHT + Math.max(0, areaH - termH), width: areaW, height: termH })
+    termView.setVisible(terminalVisible && termH > 0)
+  }
 }
 
 /** 挂载/卸载 ChatGPT 视图（WebContentsView 是原生层，渲染层浮层永远被它盖住） */
@@ -346,6 +362,10 @@ async function applyChatTheme(dark: boolean) {
   }
   // overlay 是独立窗口，主题通过事件同步
   overlayWin?.webContents.send('overlay:theme', dark)
+  // 终端视图主题同步
+  if (termView && !termView.webContents.isDestroyed()) {
+    termView.webContents.send('term:theme', dark)
+  }
 }
 
 /** Ctrl+R：主窗口与 ChatGPT 视图内都拦截，改为打开项目选择面板（避免刷新页面） */
@@ -372,6 +392,71 @@ function registerCtrlP(webContents: WebContents) {
       overlayWin?.webContents.send('overlay:openFiles')
     }
   })
+}
+
+/** Ctrl+`：主窗口与 ChatGPT 视图内都拦截，切换底部终端面板 */
+function registerTerminalShortcut(webContents: WebContents) {
+  webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown' && input.control && input.key === '`') {
+      event.preventDefault()
+      toggleTerminal()
+    }
+  })
+}
+
+// ------------------------------------------------------------
+// 底部终端（termView + node-pty / ConPTY）
+// ------------------------------------------------------------
+
+/** 当前激活项目的根目录（无激活项目时回退配置里的 projectRoot；未初始化返回空串） */
+function activeProjectRoot(): string {
+  return projects?.getState().active ?? config?.projectRoot ?? ''
+}
+
+/** 终端会话工作目录：当前激活项目根，无项目回退用户主目录 */
+function terminalCwd(): string {
+  return activeProjectRoot() || homedir()
+}
+
+/** 确保终端会话存在（页面就绪 / 打开面板 / 项目切换后调用）；返回是否成功拉起 */
+function ensureTerminalSession(): { ok: boolean; error?: string } {
+  if (terminalAlive()) return { ok: true }
+  const wc = termView?.webContents
+  // 注意：不能以 wc.isLoading() 作为门槛——页面脚本（含 term:ready）在 did-finish-load
+  // 之前执行，此时 isLoading 仍为 true，会把就绪消息误判为"未就绪"导致会话永远不拉起。
+  // term:ready 本身已保证页面订阅全部就位（它是页面脚本最后一行）。
+  if (!wc || wc.isDestroyed()) return { ok: false, error: 'term-view-not-ready' }
+  const result = spawnTerminal(terminalCwd(), {
+    onData: (data) => {
+      if (wc && !wc.isDestroyed()) wc.send('term:data', data)
+    },
+    onExit: (exitCode) => {
+      if (wc && !wc.isDestroyed()) wc.send('term:exit', { exitCode })
+    },
+  })
+  if (result.ok && wc && !wc.isDestroyed()) {
+    wc.send('term:session', { cwd: terminalCwd() })
+  }
+  return result
+}
+
+/** 切换终端面板（force 可强制开/关）；返回切换后的可见状态 */
+function toggleTerminal(force?: boolean): boolean {
+  terminalVisible = force ?? !terminalVisible
+  layout()
+  if (terminalVisible) {
+    ensureTerminalSession()
+    // 让终端拿到键盘焦点（原生视图切换有延迟，延后一次）；页面侧再聚焦 xterm textarea
+    setTimeout(() => {
+      termView?.webContents.focus()
+      termView?.webContents.send('term:focus')
+    }, 120)
+  } else {
+    // 关闭时恢复 ChatGPT 焦点
+    setTimeout(() => chatView?.webContents.focus(), 60)
+  }
+  sendToWin('term:visible', terminalVisible)
+  return terminalVisible
 }
 
 /** F12 / Ctrl+Shift+I：打开对应视图的 DevTools（再按一次关闭）——查看注入/调试用 */
@@ -529,6 +614,7 @@ async function createWindow() {
   })
   registerCtrlR(win.webContents)
   registerCtrlP(win.webContents)
+  registerTerminalShortcut(win.webContents)
   registerDevToolsShortcut(win.webContents)
 
   chatView = new WebContentsView({
@@ -571,9 +657,41 @@ async function createWindow() {
   })
   registerCtrlR(chatView.webContents)
   registerCtrlP(chatView.webContents)
+  registerTerminalShortcut(chatView.webContents)
   registerDevToolsShortcut(chatView.webContents)
   win.contentView.addChildView(chatView)
   void chatView.webContents.loadURL(CHATGPT_URL)
+
+  // ---------- 底部终端视图（xterm 页面 + ConPTY）----------
+  termView = new WebContentsView({
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      backgroundThrottling: false,
+      preload: path.join(__dirname, '../preload/term-preload.js'),
+    },
+  })
+  termView.setBackgroundColor('#1e1f22')
+  termView.setVisible(false)
+  win.contentView.addChildView(termView)
+  if (is.dev && process.env['VITE_DEV_SERVER_URL']) {
+    void termView.webContents.loadURL(`${process.env['VITE_DEV_SERVER_URL']}terminal.html`).catch((err) => {
+      console.error('[term] 加载 dev terminal 失败:', err)
+    })
+  } else {
+    const terminalHtml = path.join(__dirname, '../../dist/terminal.html')
+    void termView.webContents.loadFile(terminalHtml).catch((err) => {
+      console.error('[term] 加载 terminal 失败:', err)
+    })
+  }
+  // 初始主题同步（termView 可能早于首次主题应用加载完成）
+  termView.webContents.on('did-finish-load', () => {
+    termView?.webContents.send('term:theme', currentThemeDark)
+    // 兜底：页面加载完成时确保会话已拉起（term:ready 若因时序丢失也不会漏）
+    ensureTerminalSession()
+  })
+
   layout()
   // 当前对话轮询（CDP 求值页面 URL / fetch hook 会话 ID，用于工具调用按对话区分）
   startConversationPolling()
@@ -1596,12 +1714,20 @@ app.whenReady().then(async () => {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
   })
+  /** 项目切换后：终端会话重启进新项目根目录（仅面板打开时） */
+  function restartTerminalForProject(): void {
+    if (!terminalVisible) return
+    killTerminal()
+    ensureTerminalSession()
+  }
+
   ipcMain.handle('project:openFolder', async () => {
     // 原生对话框会被 alwaysOnTop overlay 挡住 → 弹窗前隐藏
     const result = await withOverlayHidden(() => projects.openFolder())
     if (result.ok) {
       sendToWin('project:changed', result.state)
       void syncChatInjection()
+      restartTerminalForProject()
       // 运行中自动重启网关，使新项目地址立即生效
       return { ...result, gateway: await applyGatewayConfig() }
     }
@@ -1612,6 +1738,7 @@ app.whenReady().then(async () => {
     if (result.ok) {
       sendToWin('project:changed', result.state)
       void syncChatInjection()
+      restartTerminalForProject()
       // 运行中自动重启网关，使新项目地址立即生效
       return { ...result, gateway: await applyGatewayConfig() }
     }
@@ -1628,6 +1755,7 @@ app.whenReady().then(async () => {
     // 通知渲染层刷新 titlebar 项目显示（欢迎向导选完项目立即生效）
     if (r.ok && r.state) sendToWin('project:changed', r.state)
     void syncChatInjection()
+    restartTerminalForProject()
     return r.state?.active ?? (config.projectRoot || null)
   })
 
@@ -1675,8 +1803,6 @@ app.whenReady().then(async () => {
   })
 
   // ---------- 文件预览 / 编辑（overlay File Explorer）----------
-  /** 当前激活项目的根目录（无激活项目时回退配置里的 projectRoot） */
-  const activeProjectRoot = (): string => projects.getState().active ?? config.projectRoot ?? ''
   ipcMain.handle('file:read', (_e, relPath: string) => readProjectFile(activeProjectRoot(), relPath))
   ipcMain.handle('file:write', (_e, input: { relPath: string; content: string; eol?: string; expectMtimeMs?: number }) =>
     writeProjectFile(activeProjectRoot(), input),
@@ -1694,6 +1820,21 @@ app.whenReady().then(async () => {
   ipcMain.handle('search:cancel', () => {
     cancelSearch()
   })
+
+  // ---------- 底部终端（termView + node-pty / ConPTY）----------
+  /** 终端页面就绪：拉起会话（首次或项目切换后；页面未就绪时等待 ready 兜底） */
+  ipcMain.on('term:ready', () => {
+    ensureTerminalSession()
+  })
+  ipcMain.on('term:write', (_e, data: string) => {
+    if (typeof data === 'string') writeTerminal(data)
+  })
+  ipcMain.on('term:resize', (_e, input: { cols?: number; rows?: number }) => {
+    resizeTerminal(Number(input?.cols) || 80, Number(input?.rows) || 24)
+  })
+  /** 切换终端面板（TitleBar 按钮 / Ctrl+`）；force 可强制开/关 */
+  ipcMain.handle('term:toggle', (_e, force?: boolean) => toggleTerminal(typeof force === 'boolean' ? force : undefined))
+  ipcMain.handle('term:visible', () => terminalVisible)
 
   // ---------- 主题 ----------
   ipcMain.handle('freecodex:setTheme', async (_e, dark: boolean) => {
@@ -1749,6 +1890,8 @@ async function shutdownBackground(): Promise<void> {
   }
   // 向导登录中的 cloudflared 子进程一并终止
   tunnelCoordinator?.cancel()
+  // 终端 PTY（ConPTY 子进程）一并终止
+  killTerminal()
   const jobs: Promise<unknown>[] = []
   // gateway.stop() → server.close() → hub.close() → 下游 stdio MCP 子进程会被终止
   if (gateway) jobs.push(gateway.stop().catch((err) => logQuitError('网关', err)))

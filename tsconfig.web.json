@@ -26,6 +26,7 @@
     "src/renderer/**/*.vue",
     "src/renderer-overlay/**/*.ts",
     "src/renderer-overlay/**/*.vue",
+    "src/renderer-terminal/**/*.ts",
     "env.d.ts"
   ]
 }

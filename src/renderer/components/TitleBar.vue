@@ -62,6 +62,19 @@
         <HomeIcon class="size-4" />
       </button>
 
+      <!-- 底部终端开关（Ctrl+`） -->
+      <button
+        class="flex h-9 w-10 items-center justify-center transition-colors"
+        :class="terminalVisible
+          ? 'bg-accent text-accent-foreground'
+          : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'"
+        aria-label="切换终端"
+        :title="terminalVisible ? '关闭终端（Ctrl+`）' : '打开终端（Ctrl+`）'"
+        @click="toggleTerminalPanel"
+      >
+        <TerminalIcon class="size-4" />
+      </button>
+
       <!-- 打开项目文件夹（系统文件管理器定位当前项目） -->
       <button
         class="flex h-9 w-10 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-40"
@@ -162,6 +175,7 @@ import {
   SquareIcon,
   SunIcon,
   SunMoonIcon,
+  TerminalIcon,
   WifiIcon,
   WifiOffIcon,
   XIcon,
@@ -300,6 +314,15 @@ function close(): void {
   windowControls.close()
 }
 
+// ---------- 底部终端 ----------
+const terminalVisible = ref(false)
+let unsubscribeTerminalVisible: (() => void) | undefined
+
+/** 切换底部终端面板（TitleBar 按钮；Ctrl+` 由主进程拦截） */
+function toggleTerminalPanel(): void {
+  void window.freeCodex.terminal.toggle()
+}
+
 let unsubscribe: (() => void) | undefined
 let unsubscribeProjectChanged: (() => void) | undefined
 
@@ -325,9 +348,14 @@ onMounted(async () => {
   unsubscribePluginStatus = window.freeCodex.onPluginStatus((status) => {
     pluginStatus.value = status as PluginStatus
   })
+  // 终端面板可见状态（按钮高亮）：订阅推送 + 初始化查询
+  unsubscribeTerminalVisible = window.freeCodex.terminal.onVisible((visible) => {
+    terminalVisible.value = visible
+  })
   // 初始化查询：各自兜底，失败不阻塞其余
   await windowControls.isMaximized().then((v) => { maximized.value = v }).catch(() => undefined)
   await window.freeCodex.projects.get().then((s) => { activeProject.value = s as ProjectState }).catch(() => undefined)
+  await window.freeCodex.terminal.visible().then((v) => { terminalVisible.value = v }).catch(() => undefined)
   void refreshTunnelStatus().catch(() => undefined)
 })
 
@@ -336,6 +364,7 @@ onUnmounted(() => {
   unsubscribeProjectChanged?.()
   unsubscribeTunnelStatus?.()
   unsubscribePluginStatus?.()
+  unsubscribeTerminalVisible?.()
 })
 </script>
 

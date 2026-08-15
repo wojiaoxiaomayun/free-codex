@@ -602,6 +602,15 @@ export interface FreeCodexApi {
     /** 取消当前搜索 */
     cancel: () => Promise<void>
   }
+  /** 底部终端（termView + node-pty / ConPTY） */
+  terminal: {
+    /** 切换终端面板（可强制开/关），返回切换后的可见状态 */
+    toggle: (force?: boolean) => Promise<boolean>
+    /** 当前终端面板可见状态 */
+    visible: () => Promise<boolean>
+    /** 订阅终端面板可见状态变化（TitleBar 按钮高亮同步），返回取消订阅函数 */
+    onVisible: (cb: (visible: boolean) => void) => () => void
+  }
   /** ChatGPT 连接器（开发者模式 + 插件安装自动化，主进程 net.fetch 走会话代理） */
   chatgpt: {
     /** ChatGPT 登录状态（token 捕获 + /me 验证；插件操作前需已登录） */

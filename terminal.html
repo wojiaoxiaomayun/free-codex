@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'"
+    />
+    <title>Free Codex Terminal</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="search" class="search hidden">
+      <input id="searchInput" type="text" placeholder="搜索终端输出…" spellcheck="false" />
+      <span id="searchCount" class="search-count"></span>
+      <button id="searchPrev" title="上一个（Shift+Enter）">↑</button>
+      <button id="searchNext" title="下一个（Enter）">↓</button>
+      <button id="searchClose" title="关闭（Esc）">✕</button>
+    </div>
+    <script type="module" src="/src/renderer-terminal/main.ts"></script>
+  </body>
+</html>

@@ -20,7 +20,8 @@ export default defineConfig({
           build: {
             outDir: 'dist-electron/main',
             rollupOptions: {
-              external: ['electron'],
+              // node-pty 是原生模块（.node 二进制），运行时从 node_modules require
+              external: ['electron', 'node-pty'],
             },
           },
         },
@@ -67,6 +68,20 @@ export default defineConfig({
           },
         },
       },
+      {
+        entry: 'src/preload/term-preload.ts',
+        onstart(options) {
+          options.reload()
+        },
+        vite: {
+          build: {
+            outDir: 'dist-electron/preload',
+            rollupOptions: {
+              external: ['electron'],
+            },
+          },
+        },
+      },
     ]),
     renderer(),
   ],
@@ -82,6 +97,7 @@ export default defineConfig({
       input: {
         index: resolve(dirname, 'index.html'),
         overlay: resolve(dirname, 'overlay.html'),
+        terminal: resolve(dirname, 'terminal.html'),
       },
     },
   },

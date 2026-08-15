@@ -1,0 +1,71 @@
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #1e1f22;
+}
+
+#app {
+  height: 100%;
+  padding: 4px 0 4px 6px;
+  box-sizing: border-box;
+}
+
+.xterm {
+  height: 100%;
+}
+
+/* 搜索浮层（右上角） */
+.search {
+  position: fixed;
+  top: 6px;
+  right: 10px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  border: 1px solid rgba(128, 128, 128, 0.4);
+  background: rgba(30, 31, 34, 0.95);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  font-size: 12px;
+}
+
+.search.hidden {
+  display: none;
+}
+
+.search input {
+  width: 180px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: #cccccc;
+  font-size: 12px;
+  padding: 2px 4px;
+}
+
+.search button {
+  border: none;
+  background: transparent;
+  color: #aaaaaa;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.search button:hover {
+  background: rgba(128, 128, 128, 0.25);
+  color: #ffffff;
+}
+
+.search-count {
+  color: #888888;
+  font-size: 11px;
+  min-width: 32px;
+  text-align: center;
+}
