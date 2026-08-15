@@ -151,11 +151,15 @@ function fontStack(): string {
 }
 
 /**
- * 应用字体：Nerd Font 优先（图标字形超集，含 Powerline 符号），
- * 其次 Windows Terminal 配置的字体（可用时），最后默认等宽字体。
+ * 应用字体优先级：
+ * 1. 用户配置的字体（configFace，非空即用——浏览器对缺失字形自动回退，字体名错误会退到默认）
+ * 2. Nerd Font 自动探测（图标字形超集，含 Powerline 符号）
+ * 3. Windows Terminal 主题字体（可用时）
+ * 4. 默认等宽字体
  */
-function resolveFont(wtFace: string | null): void {
-  const candidate = probeNerdFont() ?? (wtFace && isFontAvailable(wtFace) ? wtFace : null)
+function resolveFont(msg: { configFace: string; wtFace: string | null } | null): void {
+  const cfg = msg?.configFace?.trim()
+  const candidate = cfg ? cfg : probeNerdFont() ?? (msg?.wtFace && isFontAvailable(msg.wtFace) ? msg.wtFace : null)
   if (candidate === selectedFont) return
   selectedFont = candidate
   const stack = fontStack()
@@ -170,7 +174,7 @@ function resolveFont(wtFace: string | null): void {
   }
 }
 
-window.termApi.onFont((face) => resolveFont(face ?? null))
+window.termApi.onFont((msg) => resolveFont(msg ?? null))
 
 // ---------- 标签管理 ----------
 function findTab(id: string): TermTab | undefined {
@@ -447,6 +451,6 @@ document.getElementById('searchClose')!.addEventListener('click', closeSearch)
 // ---------- 初始化 ----------
 window.termApi.pageReady() // 清理孤儿会话（页面重载场景）
 applyTheme(false) // 默认暗色，主进程随后推送主题
-resolveFont(null) // 先做 Nerd Font 探测；term:font（Windows Terminal 配置）到达后覆盖
+resolveFont(null) // 先做 Nerd Font 探测；term:font（用户配置/WT 字体）到达后覆盖
 // 无标签时显示空态（首个标签由面板打开触发创建）
 emptyEl.classList.remove('hidden')

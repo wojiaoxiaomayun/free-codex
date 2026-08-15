@@ -41,6 +41,7 @@ contextBridge.exposeInMainWorld('termApi', {
     ipcRenderer.on('term:restartAll', cb)
   },
   onTheme: (cb: (dark: boolean) => void): void => subscribe<boolean>('term:theme', cb),
-  /** 字体建议（来自 Windows Terminal 配置；null = 无，走 Nerd Font 自动探测） */
-  onFont: (cb: (face: string | null) => void): void => subscribe<string | null>('term:font', cb),
+  /** 字体建议：用户配置（configFace）+ Windows Terminal 主题字体（wtFace） */
+  onFont: (cb: (msg: { configFace: string; wtFace: string | null }) => void): void =>
+    subscribe('term:font', cb),
 })

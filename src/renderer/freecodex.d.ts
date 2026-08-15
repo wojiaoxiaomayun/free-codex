@@ -64,6 +64,11 @@ export interface FreeCodexConfig {
     enabled: boolean
     url: string
   }
+  /** 底部终端配置（字体等） */
+  terminal: {
+    /** 终端字体（Nerd Fonts 等图标字形字体；空 = 自动探测） */
+    fontFace: string
+  }
   /** 会话清理配置（临时清理保留条数 / 自动清理） */
   chatCleanup: ChatCleanupSettings
   /** 内置工具启用/禁用（禁用后不注册，ChatGPT 连接器不再暴露该工具） */
@@ -608,6 +613,8 @@ export interface FreeCodexApi {
     toggle: (force?: boolean) => Promise<boolean>
     /** 当前终端面板可见状态 */
     visible: () => Promise<boolean>
+    /** 保存终端设置（字体），运行中即时生效 */
+    save: (patch: { fontFace?: string }) => Promise<{ fontFace: string }>
     /** 订阅终端面板可见状态变化（TitleBar 按钮高亮同步），返回取消订阅函数 */
     onVisible: (cb: (visible: boolean) => void) => () => void
   }

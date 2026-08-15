@@ -763,8 +763,11 @@ async function createWindow() {
   // 初始主题同步（termView 可能早于首次主题应用加载完成）
   termView.webContents.on('did-finish-load', () => {
     termView?.webContents.send('term:theme', currentThemeDark)
-    // 字体同步（Windows Terminal 主题字体 → 图标字形可用）
-    termView?.webContents.send('term:font', findWindowsTerminalFontFace())
+    // 字体：用户配置优先，其次 Windows Terminal 主题字体（渲染层再探测 Nerd Font 兜底）
+    termView?.webContents.send('term:font', {
+      configFace: config.terminal?.fontFace ?? '',
+      wtFace: findWindowsTerminalFontFace(),
+    })
     // 页面加载晚于面板首次打开时补发 focus：触发首个标签创建（延迟到可见时，避免零尺寸竖排）
     if (terminalVisible) termView?.webContents.send('term:focus')
   })
@@ -1935,6 +1938,21 @@ app.whenReady().then(async () => {
   /** 切换终端面板（TitleBar 按钮 / Ctrl+`）；force 可强制开/关 */
   ipcMain.handle('term:toggle', (_e, force?: boolean) => toggleTerminal(typeof force === 'boolean' ? force : undefined))
   ipcMain.handle('term:visible', () => terminalVisible)
+  /** 保存终端设置（字体），运行中即时生效 */
+  ipcMain.handle('terminal:save', (_e, patch: { fontFace?: string }) => {
+    config.terminal = {
+      ...config.terminal,
+      fontFace: typeof patch?.fontFace === 'string' ? patch.fontFace : '',
+    }
+    saveConfig(config)
+    if (termView && !termView.webContents.isDestroyed()) {
+      termView.webContents.send('term:font', {
+        configFace: config.terminal.fontFace,
+        wtFace: findWindowsTerminalFontFace(),
+      })
+    }
+    return config.terminal
+  })
 
   // ---------- 主题 ----------
   ipcMain.handle('freecodex:setTheme', async (_e, dark: boolean) => {

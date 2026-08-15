@@ -341,6 +341,8 @@ export function exposeFreeCodexApi(): void {
       toggle: (force?: boolean): Promise<boolean> => ipcRenderer.invoke('term:toggle', force),
       /** 当前终端面板可见状态 */
       visible: (): Promise<boolean> => ipcRenderer.invoke('term:visible'),
+      /** 保存终端设置（字体），运行中即时生效 */
+      save: (patch: { fontFace?: string }): Promise<{ fontFace: string }> => ipcRenderer.invoke('terminal:save', patch),
       /** 订阅终端面板可见状态变化（TitleBar 按钮高亮同步），返回取消订阅函数 */
       onVisible: (cb: (visible: boolean) => void): (() => void) => {
         const listener = (_event: Electron.IpcRendererEvent, value: boolean) => cb(value)

@@ -32,6 +32,16 @@ export type ProxyConfig = {
   url: string
 }
 
+/** 底部终端配置 */
+export type TerminalConfig = {
+  /**
+   * 终端字体（Nerd Fonts / Powerline 补丁字体等，图标字形所在字体）。
+   * 空 = 自动：Nerd Font 探测 → Windows Terminal 主题字体 → 默认等宽。
+   * 非空 = 强制使用（浏览器对缺失字形自动回退，字体名错误会退到默认）。
+   */
+  fontFace: string
+}
+
 /**
  * 新会话注入内容开关（chat-inject：每会话首条请求注入的上下文块）。
  * 各开关控制是否把对应段落注入；AGENTS.md/CLAUDE.md 项目里不存在时不注入（即使开启）。
@@ -65,6 +75,8 @@ export type Config = {
   ui: UiPreferences
   /** Webview（ChatGPT 视图）代理 */
   proxy: ProxyConfig
+  /** 底部终端配置（字体等） */
+  terminal: TerminalConfig
   /** 新会话注入内容开关（项目路径 / 插件名 / AGENTS.md / CLAUDE.md / skills） */
   injections: InjectionSettings
   /** 会话清理（右侧面板 Clean）：临时清理当前会话 DOM + 真实删除聊天记录 */
@@ -121,6 +133,9 @@ const defaults = (): Config => ({
     enabled: false,
     url: '',
   },
+  terminal: {
+    fontFace: '',
+  },
   injections: {
     projectPath: true,
     agentsMd: true,
@@ -175,6 +190,7 @@ export function loadConfig(): Config {
       cloudflare: { ...base.cloudflare, ...(saved.cloudflare ?? {}) },
       ui: { ...base.ui, ...(saved.ui ?? {}) },
       proxy: { ...base.proxy, ...(saved.proxy ?? {}) },
+      terminal: { ...base.terminal, ...(saved.terminal ?? {}) },
       injections: { ...base.injections, ...(saved.injections ?? {}), skills: { ...(saved.injections?.skills ?? {}) } },
       chatCleanup: { ...base.chatCleanup, ...(saved.chatCleanup ?? {}) },
       toolEnablement: { ...base.toolEnablement, ...(saved.toolEnablement ?? {}), disabledTools: [...(saved.toolEnablement?.disabledTools ?? [])] },

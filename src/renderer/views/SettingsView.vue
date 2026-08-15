@@ -427,6 +427,35 @@
           </CardContent>
         </Card>
 
+        <!-- 终端 -->
+        <Card class="mb-4">
+          <CardHeader class="pb-3">
+            <CardTitle class="text-base">终端</CardTitle>
+            <CardDescription>底部终端面板设置（Ctrl+` 打开，可多标签）。</CardDescription>
+          </CardHeader>
+          <CardContent class="flex flex-col gap-3">
+            <div class="flex items-center justify-between gap-3">
+              <div class="flex min-w-0 flex-col gap-0.5">
+                <p class="text-sm font-medium">终端字体</p>
+                <p class="text-xs text-muted-foreground">
+                  图标（Powerline / Nerd Fonts）所在字体；留空自动探测（Nerd Font → Windows Terminal 主题字体 → 默认）
+                </p>
+              </div>
+            </div>
+            <div class="flex items-center gap-2">
+              <Input
+                v-model="termFontInput"
+                placeholder="如 CaskaydiaCove Nerd Font"
+                class="h-8 min-w-0 flex-1 font-mono text-xs"
+                @keydown.enter="saveTermFont"
+              />
+              <Button variant="outline" size="sm" class="shrink-0" :disabled="savingTermFont" @click="saveTermFont">
+                {{ savingTermFont ? '保存中…' : '保存' }}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
         <!-- ChatGPT 插件（连接器） -->
         <Card class="mb-4">
           <CardHeader class="pb-3">
@@ -1095,6 +1124,26 @@ async function setUi(key: 'tools' | 'status', value: boolean): Promise<void> {
   if (!config.value) return
   config.value.ui[key] = value
   await window.freeCodex.saveUi({ [key]: value })
+}
+
+// ---------- 终端（底部终端面板） ----------
+const termFontInput = ref('')
+const savingTermFont = ref(false)
+
+/** 保存终端字体（运行中即时生效） */
+async function saveTermFont(): Promise<void> {
+  if (!config.value) return
+  savingTermFont.value = true
+  try {
+    const r = await window.freeCodex.terminal.save({ fontFace: termFontInput.value.trim() })
+    termFontInput.value = r.fontFace
+    config.value.terminal = { ...config.value.terminal, fontFace: r.fontFace }
+    toast.success('终端字体已保存')
+  } catch (err) {
+    toast.error('保存失败', { description: err instanceof Error ? err.message : String(err) })
+  } finally {
+    savingTermFont.value = false
+  }
 }
 
 /** 应用 Webview 代理（保存 + 应用 + 刷新 ChatGPT 页面） */
@@ -1891,7 +1940,10 @@ onMounted(async () => {
   // 各加载独立兜底：单个 IPC 失败不把整个设置页刷白（此前任一 await 抛错会跳过全部后续加载）
   await window.freeCodex
     .getConfig()
-    .then((c) => { config.value = c })
+    .then((c) => {
+      config.value = c
+      termFontInput.value = c?.terminal?.fontFace ?? ''
+    })
     .catch(() => toast.error('读取配置失败'))
   await refreshMcp().catch(() => toast.error('读取 MCP 服务器失败'))
   await refreshSkills().catch(() => toast.error('读取技能失败'))
