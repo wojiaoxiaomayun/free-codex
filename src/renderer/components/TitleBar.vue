@@ -5,7 +5,7 @@
   >
     <!-- 左侧：应用标识 + 项目切换 -->
     <div class="flex min-w-0 items-center gap-1.5 px-3">
-      <span class="text-sm">◈</span>
+      <img :src="logo" alt="Free Codex" class="size-4 shrink-0" draggable="false" />
       <span class="text-xs font-medium tracking-wide text-muted-foreground">Free Codex</span>
       <div class="titlebar-no-drag ml-1">
         <button
@@ -146,6 +146,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { isDark, theme } from '@/composables/useTheme'
 import type { FreeCodexWindowControls, ProjectState } from '../freecodex'
+import logo from '@/assets/logo.png'
 
 const windowControls: FreeCodexWindowControls = window.freeCodex.windowControls
 const router = useRouter()

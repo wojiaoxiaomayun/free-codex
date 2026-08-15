@@ -682,6 +682,8 @@ async function createWindow() {
     title: 'Free Codex',
     frame: false,
     backgroundColor: '#ffffff',
+    // dev 模式窗口/任务栏图标（打包后图标由 exe 自带的 build/icon.png 提供，build/ 不进安装包）
+    ...(is.dev ? { icon: path.join(__dirname, '../../build/icon.png') } : {}),
     // backgroundThrottling:false：无边框窗口拖动标题栏时渲染进程被节流暂停，
     // 内容来不及重绘会露出白底闪烁（Windows 经典问题）
     webPreferences: {
