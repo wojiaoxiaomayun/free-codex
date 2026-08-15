@@ -718,6 +718,8 @@ async function createWindow() {
   // 初始主题同步（termView 可能早于首次主题应用加载完成）
   termView.webContents.on('did-finish-load', () => {
     termView?.webContents.send('term:theme', currentThemeDark)
+    // 页面加载晚于面板首次打开时补发 focus：触发首个标签创建（延迟到可见时，避免零尺寸竖排）
+    if (terminalVisible) termView?.webContents.send('term:focus')
   })
 
   layout()

@@ -81,6 +81,8 @@ interface TermTab {
 const tabs: TermTab[] = []
 let activeId: string | null = null
 let tabSeq = 0
+/** 首个标签是否已创建（延迟到面板首次打开，见 onFocus） */
+let firstTabCreated = false
 
 const tabbar = document.getElementById('tabbar') as HTMLElement
 const container = document.getElementById('container') as HTMLElement
@@ -266,7 +268,16 @@ window.termApi.onExit(({ id, exitCode }) => {
   const t = findTab(id)
   if (t) t.term.write(`\r\n\x1b[1;31m[进程已退出 code=${exitCode ?? '?'}]\x1b[0m\r\n`)
 })
-window.termApi.onFocus(() => findTab(activeId ?? '')?.term.focus())
+window.termApi.onFocus(() => {
+  // 首个标签延迟到面板首次打开时创建：页面加载时 termView 尚未显示（高度 0），
+  // 此时创建 xterm 会按零宽度测量字符 → 文字竖排。面板显示后再建，尺寸才正确。
+  if (!firstTabCreated) {
+    firstTabCreated = true
+    newTab()
+  } else {
+    findTab(activeId ?? '')?.term.focus()
+  }
+})
 /** 项目切换：主进程已终止全部会话 → 清屏并逐个重拉（新 cwd） */
 window.termApi.onRestartAll(() => {
   for (const t of tabs) {
@@ -361,4 +372,5 @@ document.getElementById('searchClose')!.addEventListener('click', closeSearch)
 // ---------- 初始化 ----------
 window.termApi.pageReady() // 清理孤儿会话（页面重载场景）
 applyTheme(false) // 默认暗色，主进程随后推送主题
-newTab() // 首个标签
+// 无标签时显示空态（首个标签由面板打开触发创建）
+emptyEl.classList.remove('hidden')
