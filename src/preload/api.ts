@@ -343,6 +343,8 @@ export function exposeFreeCodexApi(): void {
       visible: (): Promise<boolean> => ipcRenderer.invoke('term:visible'),
       /** 保存终端设置（字体），运行中即时生效 */
       save: (patch: { fontFace?: string }): Promise<{ fontFace: string }> => ipcRenderer.invoke('terminal:save', patch),
+      /** 枚举系统已安装字体（终端字体选择器） */
+      fonts: (): Promise<{ fonts: string[] }> => ipcRenderer.invoke('terminal:fonts'),
       /** 订阅终端面板可见状态变化（TitleBar 按钮高亮同步），返回取消订阅函数 */
       onVisible: (cb: (visible: boolean) => void): (() => void) => {
         const listener = (_event: Electron.IpcRendererEvent, value: boolean) => cb(value)

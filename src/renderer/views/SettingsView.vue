@@ -434,24 +434,39 @@
             <CardDescription>底部终端面板设置（Ctrl+` 打开，可多标签）。</CardDescription>
           </CardHeader>
           <CardContent class="flex flex-col gap-3">
-            <div class="flex items-center justify-between gap-3">
-              <div class="flex min-w-0 flex-col gap-0.5">
-                <p class="text-sm font-medium">终端字体</p>
-                <p class="text-xs text-muted-foreground">
-                  图标（Powerline / Nerd Fonts）所在字体；留空自动探测（Nerd Font → Windows Terminal 主题字体 → 默认）
-                </p>
-              </div>
+            <div class="flex min-w-0 flex-col gap-0.5">
+              <p class="text-sm font-medium">终端字体</p>
+              <p class="text-xs text-muted-foreground">
+                选择图标（Powerline / Nerd Fonts）所在字体；「自动」= Nerd Font 探测 → Windows Terminal 主题字体 → 默认
+              </p>
             </div>
             <div class="flex items-center gap-2">
-              <Input
-                v-model="termFontInput"
-                placeholder="如 CaskaydiaCove Nerd Font"
-                class="h-8 min-w-0 flex-1 font-mono text-xs"
-                @keydown.enter="saveTermFont"
-              />
-              <Button variant="outline" size="sm" class="shrink-0" :disabled="savingTermFont" @click="saveTermFont">
-                {{ savingTermFont ? '保存中…' : '保存' }}
-              </Button>
+              <Select :model-value="termFontFace" @update:model-value="onPickTermFont">
+                <SelectTrigger class="h-8 w-full min-w-0 flex-1 font-mono text-xs" aria-label="终端字体">
+                  <SelectValue placeholder="自动（推荐）" />
+                </SelectTrigger>
+                <SelectContent class="max-h-80">
+                  <SelectItem value="">自动（推荐）</SelectItem>
+                  <SelectGroup>
+                    <SelectItem v-for="f in fontList" :key="f" :value="f">
+                      <span class="flex items-center gap-2" :style="{ fontFamily: `'${f}', monospace` }">
+                        <span class="inline-block w-6 text-center" aria-hidden="true"> </span>
+                        {{ f }}
+                      </span>
+                    </SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+              <span v-if="fontLoading" class="shrink-0 text-xs text-muted-foreground/60">加载字体…</span>
+            </div>
+            <!-- 字体预览：图标字形 + 常规字符（所选字体缺字形时此处显示豆腐块，可提前发现） -->
+            <div
+              class="flex items-center gap-3 rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-base"
+              :style="{ fontFamily: `'${previewFont}', monospace` }"
+            >
+              <span v-for="g in fontIconGlyphs" :key="g" class="leading-none" aria-hidden="true">{{ g }}</span>
+              <span class="ml-1 text-xs opacity-70">AaBbCc 123 终端</span>
+              <span v-if="previewFont" class="ml-auto text-[10px] text-muted-foreground/70">{{ previewFont }}</span>
             </div>
           </CardContent>
         </Card>
@@ -1127,22 +1142,32 @@ async function setUi(key: 'tools' | 'status', value: boolean): Promise<void> {
 }
 
 // ---------- 终端（底部终端面板） ----------
-const termFontInput = ref('')
-const savingTermFont = ref(false)
+const termFontFace = ref('')
+const fontList = ref<string[]>([])
+const fontLoading = ref(false)
+/** 预览用图标字形（Powerline/Nerd Fonts 常见私有区码位） */
+const fontIconGlyphs = ['\uE0B0', '\uE0A0', '\uF002']
 
-/** 保存终端字体（运行中即时生效） */
-async function saveTermFont(): Promise<void> {
+/** 预览字体：手动选择优先；自动模式下用列表里第一个 Nerd/Powerline 字体近似展示 */
+const previewFont = computed(() => {
+  if (termFontFace.value) return termFontFace.value
+  return (
+    fontList.value.find((f) => /nerd|powerline|nf\b|for powerline/i.test(f)) ?? ''
+  )
+})
+
+/** 下拉选择即保存（运行中即时生效） */
+async function onPickTermFont(value: unknown): Promise<void> {
+  const face = typeof value === 'string' ? value : ''
+  termFontFace.value = face
   if (!config.value) return
-  savingTermFont.value = true
   try {
-    const r = await window.freeCodex.terminal.save({ fontFace: termFontInput.value.trim() })
-    termFontInput.value = r.fontFace
+    const r = await window.freeCodex.terminal.save({ fontFace: face })
+    termFontFace.value = r.fontFace
     config.value.terminal = { ...config.value.terminal, fontFace: r.fontFace }
-    toast.success('终端字体已保存')
+    toast.success(face ? `终端字体已切换：${face}` : '终端字体已切换为自动')
   } catch (err) {
     toast.error('保存失败', { description: err instanceof Error ? err.message : String(err) })
-  } finally {
-    savingTermFont.value = false
   }
 }
 
@@ -1942,9 +1967,16 @@ onMounted(async () => {
     .getConfig()
     .then((c) => {
       config.value = c
-      termFontInput.value = c?.terminal?.fontFace ?? ''
+      termFontFace.value = c?.terminal?.fontFace ?? ''
     })
     .catch(() => toast.error('读取配置失败'))
+  // 终端字体选择器：枚举系统字体（失败不阻塞）
+  fontLoading.value = true
+  await window.freeCodex
+    .terminal.fonts()
+    .then((r) => { fontList.value = r.fonts })
+    .catch(() => { fontList.value = [] })
+    .finally(() => { fontLoading.value = false })
   await refreshMcp().catch(() => toast.error('读取 MCP 服务器失败'))
   await refreshSkills().catch(() => toast.error('读取技能失败'))
   await loadToolEnablement().catch(() => undefined) // 先加载禁用列表，refreshGateway 合并显示被禁用的工具

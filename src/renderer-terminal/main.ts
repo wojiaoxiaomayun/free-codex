@@ -98,52 +98,12 @@ function applyTheme(isDark: boolean): void {
 window.termApi.onTheme((isDark) => applyTheme(isDark === true))
 
 // ---------- 字体（Nerd Fonts 图标字形支持）----------
-/** 常见 Nerd Font 名称（图标字形所在字体），按优先级探测 */
-const NERD_FONTS = [
-  'CaskaydiaCove Nerd Font',
-  'CaskaydiaCove NF',
-  'JetBrainsMono Nerd Font',
-  'JetBrainsMono NF',
-  'MesloLGM Nerd Font',
-  'MesloLGM NF',
-  'FiraCode Nerd Font',
-  'FiraCode NF',
-  'Hack Nerd Font',
-  'Hack NF',
-  'UbuntuMono Nerd Font',
-  'SauceCodePro Nerd Font',
-  'Cousine Nerd Font',
-  'DejaVu Sans Mono Nerd Font',
-  'VictorMono Nerd Font',
-  'Iosevka Nerd Font',
-  'SpaceMono Nerd Font',
-  'Mononoki Nerd Font',
-  'Terminess Nerd Font',
-  'RobotoMono Nerd Font',
-  '0xProto Nerd Font',
-  'GeistMono Nerd Font',
-  // 带 Powerline 符号的版本（部分图标可用）
-  'Cascadia Code PL',
-  'Cascadia Mono PL',
-]
-
-/** 当前选中的终端字体（null = 未确定） */
+/**
+ * 当前选中的终端字体（null = 默认）。
+ * 注意：不做 document.fonts.check 可用性探测——该 API 对不存在的字体也返回 true
+ * （回退链匹配），会把幻影字体当成已安装。可用性判断交给主进程的 TTF 名字表枚举。
+ */
 let selectedFont: string | null = null
-
-function isFontAvailable(face: string): boolean {
-  try {
-    return document.fonts.check(`16px "${face}"`)
-  } catch {
-    return false
-  }
-}
-
-function probeNerdFont(): string | null {
-  for (const name of NERD_FONTS) {
-    if (isFontAvailable(name)) return name
-  }
-  return null
-}
 
 function fontStack(): string {
   if (selectedFont) return `"${selectedFont}", 'Cascadia Mono', Consolas, 'Courier New', monospace`
@@ -152,14 +112,13 @@ function fontStack(): string {
 
 /**
  * 应用字体优先级：
- * 1. 用户配置的字体（configFace，非空即用——浏览器对缺失字形自动回退，字体名错误会退到默认）
- * 2. Nerd Font 自动探测（图标字形超集，含 Powerline 符号）
- * 3. Windows Terminal 主题字体（可用时）
- * 4. 默认等宽字体
+ * 1. 用户配置的字体（configFace，非空即用——浏览器对缺失字形自动逐字符回退）
+ * 2. 主进程推荐的自动字体（autoFace：Nerd Font 探测 → WT 主题字体，基于真实枚举）
+ * 3. 默认等宽字体
  */
-function resolveFont(msg: { configFace: string; wtFace: string | null } | null): void {
+function resolveFont(msg: { configFace: string; autoFace: string | null } | null): void {
   const cfg = msg?.configFace?.trim()
-  const candidate = cfg ? cfg : probeNerdFont() ?? (msg?.wtFace && isFontAvailable(msg.wtFace) ? msg.wtFace : null)
+  const candidate = cfg ? cfg : (msg?.autoFace ?? null)
   if (candidate === selectedFont) return
   selectedFont = candidate
   const stack = fontStack()
@@ -451,6 +410,6 @@ document.getElementById('searchClose')!.addEventListener('click', closeSearch)
 // ---------- 初始化 ----------
 window.termApi.pageReady() // 清理孤儿会话（页面重载场景）
 applyTheme(false) // 默认暗色，主进程随后推送主题
-resolveFont(null) // 先做 Nerd Font 探测；term:font（用户配置/WT 字体）到达后覆盖
+resolveFont(null) // 默认等宽；term:font（用户配置/自动推荐）到达后应用
 // 无标签时显示空态（首个标签由面板打开触发创建）
 emptyEl.classList.remove('hidden')

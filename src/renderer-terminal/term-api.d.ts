@@ -40,8 +40,8 @@ export interface TermApi {
   /** 项目切换：全部会话已终止，渲染层清屏并逐个重拉 */
   onRestartAll(cb: () => void): void
   onTheme(cb: (dark: boolean) => void): void
-  /** 字体建议：用户配置（configFace）+ Windows Terminal 主题字体（wtFace） */
-  onFont(cb: (msg: { configFace: string; wtFace: string | null }) => void): void
+  /** 字体建议：用户配置（configFace）+ 自动推荐（autoFace，主进程基于真实枚举计算） */
+  onFont(cb: (msg: { configFace: string; autoFace: string | null }) => void): void
 }
 
 declare global {

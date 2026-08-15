@@ -17,6 +17,7 @@ import { listProjectFiles } from './project-files'
 import { readProjectFile, writeProjectFile, openFileExternally } from './file-viewer'
 import { runSearch, cancelSearch } from './search'
 import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, killAllTerminals } from './terminal'
+import { listInstalledFonts, pickAutoTerminalFont } from './fonts'
 import { homedir } from 'node:os'
 import { listDiffRecords, revertFile, confirmFile, undoHunk } from './file-diffs'
 import {
@@ -268,25 +269,27 @@ function layout() {
   const right = panelCollapsed ? PANEL_RAIL : PANEL_WIDTH
   const areaW = Math.max(0, width - right)
   const areaH = Math.max(0, height - TITLEBAR_HEIGHT)
-  // 底部终端可见时，chatView 上移让出 termHeight
-  const termH = terminalVisible ? Math.min(termHeight, Math.max(120, areaH - 120)) : 0
+  // 终端只在 ChatGPT 视图显示时展示（进入设置/应用页面时随 chatView 一起隐藏）
+  const termActive = terminalVisible && viewVisible
+  const termH = termActive ? Math.min(termHeight, Math.max(120, areaH - 120)) : 0
   chatView.setBounds({ x: 0, y: TITLEBAR_HEIGHT, width: areaW, height: Math.max(0, areaH - termH) })
   if (termView) {
     termView.setBounds({ x: 0, y: TITLEBAR_HEIGHT + Math.max(0, areaH - termH), width: areaW, height: termH })
-    termView.setVisible(terminalVisible && termH > 0)
+    termView.setVisible(termActive && termH > 0)
   }
 }
 
 /** 挂载/卸载 ChatGPT 视图（WebContentsView 是原生层，渲染层浮层永远被它盖住） */
 function setViewVisible(visible: boolean) {
   if (!win || !chatView || visible === viewVisible) return
+  // 先更新状态再布局：layout 依据 viewVisible 决定终端是否展示（应用页面打开时终端一并隐藏）
+  viewVisible = visible
   if (visible) {
     win.contentView.addChildView(chatView)
-    layout()
   } else {
     win.contentView.removeChildView(chatView)
   }
-  viewVisible = visible
+  layout()
 }
 
 // ------------------------------------------------------------
@@ -451,6 +454,30 @@ function findWindowsTerminalFontFace(): string | null {
   } catch {
     return null
   }
+}
+
+/** 已安装字体缓存（枚举较慢，只做一次） */
+let fontsCache: string[] | null = null
+function getInstalledFonts(): string[] {
+  if (!fontsCache) fontsCache = listInstalledFonts()
+  return fontsCache
+}
+
+/**
+ * 终端字体建议载荷：用户配置（configFace）+ 自动推荐（autoFace）。
+ * 自动推荐基于可靠的 TTF 名字表枚举：优先常见 Nerd Font，其次名称含
+ * nerd/powerline 的字体，再其次 Windows Terminal 主题字体（须在枚举里）。
+ * 注意：不能用 document.fonts.check 做可用性探测——它对不存在的字体也返回 true。
+ */
+function terminalFontPayload(): { configFace: string; autoFace: string | null } {
+  const fonts = getInstalledFonts()
+  const auto =
+    pickAutoTerminalFont(fonts) ??
+    (() => {
+      const wt = findWindowsTerminalFontFace()
+      return wt && fonts.includes(wt) ? wt : null
+    })()
+  return { configFace: config.terminal?.fontFace ?? '', autoFace: auto }
 }
 
 /** 当前激活项目的根目录（无激活项目时回退配置里的 projectRoot；未初始化返回空串） */
@@ -763,11 +790,8 @@ async function createWindow() {
   // 初始主题同步（termView 可能早于首次主题应用加载完成）
   termView.webContents.on('did-finish-load', () => {
     termView?.webContents.send('term:theme', currentThemeDark)
-    // 字体：用户配置优先，其次 Windows Terminal 主题字体（渲染层再探测 Nerd Font 兜底）
-    termView?.webContents.send('term:font', {
-      configFace: config.terminal?.fontFace ?? '',
-      wtFace: findWindowsTerminalFontFace(),
-    })
+    // 字体建议（用户配置 + 自动推荐）
+    termView?.webContents.send('term:font', terminalFontPayload())
     // 页面加载晚于面板首次打开时补发 focus：触发首个标签创建（延迟到可见时，避免零尺寸竖排）
     if (terminalVisible) termView?.webContents.send('term:focus')
   })
@@ -1946,13 +1970,12 @@ app.whenReady().then(async () => {
     }
     saveConfig(config)
     if (termView && !termView.webContents.isDestroyed()) {
-      termView.webContents.send('term:font', {
-        configFace: config.terminal.fontFace,
-        wtFace: findWindowsTerminalFontFace(),
-      })
+      termView.webContents.send('term:font', terminalFontPayload())
     }
     return config.terminal
   })
+  /** 枚举系统已安装字体（终端字体选择器） */
+  ipcMain.handle('terminal:fonts', () => ({ fonts: getInstalledFonts() }))
 
   // ---------- 主题 ----------
   ipcMain.handle('freecodex:setTheme', async (_e, dark: boolean) => {
