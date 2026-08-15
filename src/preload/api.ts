@@ -129,6 +129,8 @@ export function exposeFreeCodexApi(): void {
     projects: {
       get: () => ipcRenderer.invoke('project:get'),
       openFolder: () => ipcRenderer.invoke('project:openFolder'),
+      /** 在系统文件管理器中打开当前激活项目的目录 */
+      openInSystem: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('project:openInSystem'),
       activate: (path: string) => ipcRenderer.invoke('project:activate', path),
     },
 
@@ -278,6 +280,9 @@ export function exposeFreeCodexApi(): void {
       ipcRenderer.invoke('freecodex:insertFileReference', text),
     insertSkillTrigger: (name: string): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke('freecodex:insertSkillTrigger', name),
+    /** 右键菜单：把文本（文件引用 / 选中片段）插入 ChatGPT 输入框 */
+    insertToChat: (text: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('freecodex:insertToChat', text),
     /** overlay 子窗口上报技能面板已关闭（未选中技能）→ 主进程把被拦截的 / 写回 ChatGPT 输入框 */
     skillPaletteClosed: (): void => {
       ipcRenderer.send('freecodex:skillPaletteClosed')
@@ -302,6 +307,32 @@ export function exposeFreeCodexApi(): void {
       const listener = (_event: Electron.IpcRendererEvent, value: unknown) => cb(value)
       ipcRenderer.on('diff:updated', listener)
       return () => ipcRenderer.removeListener('diff:updated', listener)
+    },
+
+    // ---------- 文件预览 / 编辑（overlay File Explorer）----------
+    /** 读取项目内文件（文本归一化 LF + 记录 EOL/mtimeMs；二进制只回元信息） */
+    readFile: (relPath: string): Promise<unknown> => ipcRenderer.invoke('file:read', relPath),
+    /** 写入项目内文件（带 mtime 冲突检测与 EOL 还原） */
+    writeFile: (input: { relPath: string; content: string; eol?: string; expectMtimeMs?: number }): Promise<unknown> =>
+      ipcRenderer.invoke('file:write', input),
+    /** 在系统默认编辑器中打开（大文件 / 二进制兜底） */
+    openFileExternally: (relPath: string): Promise<unknown> => ipcRenderer.invoke('file:openExternally', relPath),
+    /** 主窗口请求在 overlay 打开文件工作区 */
+    openFiles: (): Promise<void> => ipcRenderer.invoke('overlay:openFiles'),
+    /** overlay 子窗口订阅"打开文件工作区"，返回取消订阅函数 */
+    onOpenFiles: (cb: () => void): (() => void) => {
+      const listener = () => cb()
+      ipcRenderer.on('overlay:openFiles', listener)
+      return () => ipcRenderer.removeListener('overlay:openFiles', listener)
+    },
+
+    // ---------- 全文搜索（ripgrep）----------
+    search: {
+      /** 跨项目内容搜索（结果含文件相对路径 + 行号 + 高亮区间；支持 include/exclude glob） */
+      run: (input: { pattern: string; options?: { caseSensitive?: boolean; regex?: boolean; wholeWord?: boolean; include?: string[]; exclude?: string[] } }): Promise<unknown> =>
+        ipcRenderer.invoke('search:run', input),
+      /** 取消当前搜索 */
+      cancel: (): Promise<void> => ipcRenderer.invoke('search:cancel'),
     },
   })
 }

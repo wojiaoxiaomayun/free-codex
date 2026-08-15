@@ -8,7 +8,7 @@
       close-button
     />
 
-    <!-- 命令面板 / Diff：渲染在 overlay 子窗口，天然浮在 ChatGPT 原生视图之上 -->
+    <!-- 命令面板 / Diff / 文件工作区：渲染在 overlay 子窗口，天然浮在 ChatGPT 原生视图之上 -->
     <FilePalette v-model:open="fileOpen" />
     <SkillPalette v-model:open="skillOpen" />
     <ProjectPalette v-model:open="projectOpen" />
@@ -19,6 +19,7 @@
       @confirmed="diffOpen = false"
       @undo-result="onUndoResult"
     />
+    <FileExplorer v-model:open="explorerOpen" :dark="dark" />
   </div>
 </template>
 
@@ -29,13 +30,15 @@ import FilePalette from '../renderer/components/FilePalette.vue'
 import SkillPalette from '../renderer/components/SkillPalette.vue'
 import ProjectPalette from '../renderer/components/ProjectPalette.vue'
 import DiffViewer from '../renderer/components/DiffViewer.vue'
+import FileExplorer from '../renderer/components/FileExplorer.vue'
 import type { FileDiffRecord, ToastBridgeInput } from '../renderer/freecodex'
 
-// ---------- 各面板 / Diff 的打开状态（overlay 内部统一管理）----------
+// ---------- 各面板 / Diff / 文件工作区的打开状态（overlay 内部统一管理）----------
 const fileOpen = ref(false)
 const skillOpen = ref(false)
 const projectOpen = ref(false)
 const diffOpen = ref(false)
+const explorerOpen = ref(false)
 const diffRecord = ref<FileDiffRecord | null>(null)
 
 // ---------- 主题（主进程 overlay:theme 推送）----------
@@ -47,7 +50,9 @@ const dark = ref(false)
 // modal：面板/Diff 打开 → 显示 + 拦截交互 + 聚焦
 const { activeToasts } = useVueSonner()
 const toastCount = computed(() => activeToasts.value.length)
-const modalOpen = computed(() => fileOpen.value || skillOpen.value || projectOpen.value || diffOpen.value)
+const modalOpen = computed(
+  () => fileOpen.value || skillOpen.value || projectOpen.value || diffOpen.value || explorerOpen.value,
+)
 
 let lastInteractive = false
 
@@ -76,6 +81,7 @@ let removeTheme: (() => void) | undefined
 let removeProjectPalette: (() => void) | undefined
 let removeOpenDiff: (() => void) | undefined
 let removeToast: (() => void) | undefined
+let removeOpenFiles: (() => void) | undefined
 
 /** 主窗口发来的 toast → 本地 vue-sonner store（渲染 + 触发 overlay 显示） */
 function onBridgeToast(input: ToastBridgeInput): void {
@@ -126,6 +132,10 @@ onMounted(() => {
   })
 
   removeToast = window.freeCodex.onToast(onBridgeToast)
+
+  removeOpenFiles = window.freeCodex.onOpenFiles(() => {
+    explorerOpen.value = true
+  })
 })
 
 onUnmounted(() => {
@@ -134,5 +144,6 @@ onUnmounted(() => {
   removeProjectPalette?.()
   removeOpenDiff?.()
   removeToast?.()
+  removeOpenFiles?.()
 })
 </script>

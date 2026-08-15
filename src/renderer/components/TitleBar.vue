@@ -62,6 +62,17 @@
         <HomeIcon class="size-4" />
       </button>
 
+      <!-- 打开项目文件夹（系统文件管理器定位当前项目） -->
+      <button
+        class="flex h-9 w-10 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-40"
+        aria-label="打开项目文件夹"
+        :title="activeProjectName ? `打开项目文件夹：${activeProjectName}` : '打开项目文件夹（未选择项目）'"
+        :disabled="!activeProjectName"
+        @click="openProjectFolder"
+      >
+        <FolderIcon class="size-4" />
+      </button>
+
       <!-- 设置 -->
       <button
         class="flex h-9 w-10 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
@@ -71,15 +82,43 @@
         <SettingsIcon class="size-4" />
       </button>
 
-      <!-- 主题切换 -->
-      <button
-        class="flex h-9 w-10 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-        :aria-label="isDark ? '切换亮色主题' : '切换暗色主题'"
-        @click="toggleTheme"
-      >
-        <SunIcon v-if="isDark" class="size-4" />
-        <MoonIcon v-else class="size-4" />
-      </button>
+      <!-- 主题切换（亮色 / 暗色 / 跟随系统） -->
+      <DropdownMenu>
+        <DropdownMenuTrigger as-child>
+          <button
+            class="flex h-9 w-10 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+            aria-label="切换主题"
+            :title="`主题：${themeLabel}`"
+          >
+            <SunMoonIcon v-if="theme === 'auto'" class="size-4" />
+            <SunIcon v-else-if="theme === 'light'" class="size-4" />
+            <MoonIcon v-else class="size-4" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" class="min-w-32">
+          <DropdownMenuItem
+            :class="theme === 'light' && 'bg-accent text-accent-foreground'"
+            @click="theme = 'light'"
+          >
+            <SunIcon data-icon="inline-start" />
+            亮色
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            :class="theme === 'dark' && 'bg-accent text-accent-foreground'"
+            @click="theme = 'dark'"
+          >
+            <MoonIcon data-icon="inline-start" />
+            暗色
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            :class="theme === 'auto' && 'bg-accent text-accent-foreground'"
+            @click="theme = 'auto'"
+          >
+            <SunMoonIcon data-icon="inline-start" />
+            跟随系统
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
       <button
         class="flex h-9 w-11 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
         aria-label="最小化"
@@ -107,11 +146,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { toast } from '@/lib/toast-bridge'
 import {
   CopyIcon,
+  FolderIcon,
   FolderOpenIcon,
   HomeIcon,
   Loader2Icon,
@@ -121,10 +161,18 @@ import {
   SettingsIcon,
   SquareIcon,
   SunIcon,
+  SunMoonIcon,
   WifiIcon,
   WifiOffIcon,
   XIcon,
 } from 'lucide-vue-next'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { isDark, theme } from '@/composables/useTheme'
 import type { FreeCodexWindowControls, PluginStatus, ProjectState, TunnelStatus } from '../freecodex'
 
 const windowControls: FreeCodexWindowControls = window.freeCodex.windowControls
@@ -147,6 +195,18 @@ const activeProjectName = computed(() => {
 async function openSettings(): Promise<void> {
   router.push('/settings')
   await window.freeCodex.hideViews().catch(() => undefined)
+}
+
+/** 在系统文件管理器中打开当前项目目录（定位项目位置） */
+async function openProjectFolder(): Promise<void> {
+  if (!activeProject.value?.active) {
+    toast.error('请先选择项目目录')
+    return
+  }
+  const result = await window.freeCodex.projects.openInSystem()
+  if (!result.ok) {
+    toast.error(`打开项目文件夹失败：${result.error ?? '未知错误'}`)
+  }
 }
 
 /** 回到 ChatGPT 首页（加载起始 URL，避免刷新只重载当前链接） */
@@ -209,17 +269,23 @@ async function refreshPluginStatus(): Promise<void> {
   }
 }
 
-// ---------- 主题切换 ----------
-const isDark = ref(document.documentElement.classList.contains('dark'))
+// ---------- 主题切换（useColorMode：亮色 / 暗色 / 跟随系统）----------
+const themeLabel = computed(() => {
+  switch (theme.value) {
+    case 'dark':
+      return '暗色'
+    case 'auto':
+      return '跟随系统'
+    default:
+      return '亮色'
+  }
+})
 
-function toggleTheme(): void {
-  const dark = !isDark.value
-  document.documentElement.classList.toggle('dark', dark)
-  localStorage.setItem('free-codex-theme', dark ? 'dark' : 'light')
-  isDark.value = dark
-  // 同步 ChatGPT 页面主题（主进程注入覆盖样式）
+// 同步 ChatGPT 页面 + overlay 主题（主进程注入覆盖样式）
+// 跟随系统模式下系统偏好变化也要同步，所以 watch 解析后的 isDark 而非原始 mode
+watch(isDark, (dark) => {
   window.freeCodex.setTheme(dark).catch(() => toast.error('ChatGPT 主题同步失败'))
-}
+}, { immediate: true })
 
 // ---------- 窗口控制 ----------
 function minimize(): void {
@@ -263,8 +329,6 @@ onMounted(async () => {
   await windowControls.isMaximized().then((v) => { maximized.value = v }).catch(() => undefined)
   await window.freeCodex.projects.get().then((s) => { activeProject.value = s as ProjectState }).catch(() => undefined)
   void refreshTunnelStatus().catch(() => undefined)
-  // 启动时应用当前主题到 ChatGPT 页面（ChatGPT 视图可能已打开）
-  window.freeCodex.setTheme(isDark.value).catch(() => undefined)
 })
 
 onUnmounted(() => {

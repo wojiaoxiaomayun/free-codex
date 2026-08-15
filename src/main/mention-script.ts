@@ -189,5 +189,32 @@ export const MENTION_SCRIPT = `
     window.__freehubLastRestoreAt = Date.now();
     return window.__freehubInsertText('/');
   };
+
+  /**
+   * 右键菜单等无触发字符场景：把文本插入 ChatGPT 输入框（光标处）。
+   * 优先复用最近记录的可编辑元素（用户刚输入过 @ / 的输入框，保留替换语义）；
+   * 否则用当前聚焦的可编辑元素；再找不到就自动定位 composer（#prompt-textarea 等）。
+   */
+  window.__freehubInsertToComposer = function (text) {
+    var el = window.__freehubMentionEl && document.contains(window.__freehubMentionEl)
+      ? window.__freehubMentionEl
+      : null;
+    if (!el) {
+      var active = document.activeElement;
+      if (active && isEditable(active)) el = active;
+    }
+    if (!el) {
+      var ta = document.getElementById('prompt-textarea');
+      if (!ta || !isEditable(ta)) ta = document.querySelector('textarea[id="prompt-textarea"]');
+      if (!ta) ta = document.querySelector('div[contenteditable="true"][data-testid*="composer"]');
+      if (!ta) ta = document.querySelector('form div[contenteditable="true"]');
+      el = ta || null;
+    }
+    if (!el) return { ok: false, error: 'no-composer-found' };
+    // 触发元素已失效（未输入 @ / 或已切换）→ 不替换触发字符，按光标插入
+    if (!document.contains(window.__freehubMentionEl)) window.__freehubTriggerPos = -1;
+    window.__freehubMentionEl = el;
+    return window.__freehubInsertText(text);
+  };
 })();
 `

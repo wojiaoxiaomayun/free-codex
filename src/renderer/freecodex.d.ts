@@ -269,6 +269,10 @@ export interface ProjectFileEntry {
   path: string
   relPath: string
   name: string
+  /** 文件大小（字节；stat 失败时为 0） */
+  size: number
+  /** 最后修改时间（ms；stat 失败时为 0） */
+  mtimeMs: number
 }
 
 export interface ProjectFileListResult {
@@ -327,6 +331,91 @@ export interface DiffHunkUndoResult {
   ok: boolean
   error?: string
   diff?: FileDiffRecord | null
+}
+
+// ---------- 文件预览 / 编辑（overlay File Explorer）----------
+
+/** 文件内容类型：文本 / 二进制（含图片等） */
+export type FileKind = 'text' | 'binary'
+
+/** file:read 结果 */
+export interface ReadFileResult {
+  ok: boolean
+  kind?: FileKind
+  /** UTF-8 文本内容（binary / 失败时为空；已归一化为 LF） */
+  content?: string
+  /** 文件大小（字节） */
+  size?: number
+  /** 最后修改时间（ms，保存冲突检测用） */
+  mtimeMs?: number
+  /** 原始换行符（\n 或 \r\n），保存时还原 */
+  eol?: string
+  /** 超过大小上限被截断 */
+  truncated?: boolean
+  error?: string
+}
+
+/** file:write 入参 */
+export interface WriteFileInput {
+  /** 项目内相对路径 */
+  relPath: string
+  /** 编辑器内容（LF 归一化） */
+  content: string
+  /** 原始换行符（\r\n 时写盘前还原） */
+  eol?: string
+  /** 打开时的 mtimeMs；不匹配说明磁盘已被外部修改 */
+  expectMtimeMs?: number
+}
+
+/** file:write 结果 */
+export interface WriteFileResult {
+  ok: boolean
+  /** 磁盘上的文件已被外部修改（mtime 不匹配），UI 需让用户确认是否覆盖 */
+  conflict?: boolean
+  error?: string
+}
+
+// ---------- 全文搜索（ripgrep）----------
+
+/** 搜索选项（默认：忽略大小写 + 字面量 + 子串） */
+export interface SearchOptions {
+  /** 区分大小写 */
+  caseSensitive?: boolean
+  /** 按正则匹配 */
+  regex?: boolean
+  /** 全词匹配 */
+  wholeWord?: boolean
+  /** 仅搜索匹配这些 glob 的文件（多个取并集；如 *.ts、src 目录） */
+  include?: string[]
+  /** 排除匹配这些 glob 的文件（如 dist 目录、*.min.js） */
+  exclude?: string[]
+}
+
+/** 行内匹配区间（字符偏移） */
+export interface SearchHighlight {
+  start: number
+  end: number
+}
+
+/** 单个搜索结果（一个文件的一行） */
+export interface SearchMatch {
+  /** 项目内相对路径（/ 分隔，与文件树一致） */
+  file: string
+  /** 1-based 行号 */
+  line: number
+  /** 行内容（已去尾换行） */
+  text: string
+  /** 匹配区间（可能一行多个） */
+  highlights: SearchHighlight[]
+}
+
+/** search:run 结果 */
+export interface SearchRunResult {
+  ok: boolean
+  results: SearchMatch[]
+  /** 达到全局上限被截断 */
+  truncated: boolean
+  error?: string
 }
 
 // ---------- ChatGPT 连接器 ----------
@@ -477,6 +566,8 @@ export interface FreeCodexApi {
   insertFileReference: (text: string) => Promise<InsertFileReferenceResult>
   /** 把 /skill:名称 插入 ChatGPT 输入框（替换触发的 /） */
   insertSkillTrigger: (name: string) => Promise<InsertFileReferenceResult>
+  /** 右键菜单：把文本（文件引用 / 选中片段）插入 ChatGPT 输入框（自动定位 composer） */
+  insertToChat: (text: string) => Promise<InsertFileReferenceResult>
   /** 订阅引擎工具调用产生的文件 diff */
   onFileDiff: (cb: (record: FileDiffRecord) => void) => () => void
   /** 订阅网关事件（Logs 面板），返回取消订阅函数 */
@@ -494,6 +585,23 @@ export interface FreeCodexApi {
   undoDiffHunk: (request: DiffHunkUndoRequest) => Promise<DiffHunkUndoResult>
   /** 订阅 diff 记录更新（整段撤销后重算），返回取消订阅函数 */
   onDiffUpdated: (cb: (record: FileDiffRecord) => void) => () => void
+  /** 读取项目内文件（文本归一化 LF + 记录 EOL/mtimeMs；二进制只回元信息） */
+  readFile: (relPath: string) => Promise<ReadFileResult>
+  /** 写入项目内文件（带 mtime 冲突检测与 EOL 还原） */
+  writeFile: (input: WriteFileInput) => Promise<WriteFileResult>
+  /** 在系统默认编辑器中打开（大文件 / 二进制兜底） */
+  openFileExternally: (relPath: string) => Promise<{ ok: boolean; error?: string }>
+  /** 主窗口请求在 overlay 打开文件工作区 */
+  openFiles: () => Promise<void>
+  /** overlay 子窗口订阅"打开文件工作区"，返回取消订阅函数 */
+  onOpenFiles: (cb: () => void) => () => void
+  /** 全文搜索（ripgrep，File Explorer 内嵌） */
+  search: {
+    /** 跨项目内容搜索（结果含文件相对路径 + 行号 + 高亮区间） */
+    run: (input: { pattern: string; options?: SearchOptions }) => Promise<SearchRunResult>
+    /** 取消当前搜索 */
+    cancel: () => Promise<void>
+  }
   /** ChatGPT 连接器（开发者模式 + 插件安装自动化，主进程 net.fetch 走会话代理） */
   chatgpt: {
     /** ChatGPT 登录状态（token 捕获 + /me 验证；插件操作前需已登录） */
@@ -580,6 +688,8 @@ export interface FreeCodexApi {
     get: () => Promise<ProjectState>
     /** 打开已有文件夹并激活为当前项目 */
     openFolder: () => Promise<ProjectActionResult>
+    /** 在系统文件管理器中打开当前激活项目的目录 */
+    openInSystem: () => Promise<{ ok: boolean; error?: string }>
     /** 激活历史中的指定项目 */
     activate: (path: string) => Promise<ProjectActionResult>
   }

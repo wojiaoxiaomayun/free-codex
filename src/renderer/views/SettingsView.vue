@@ -665,7 +665,7 @@
 
           <Card v-if="!Object.keys(mcpData.mcpServers).length" class="border-dashed">
             <CardContent class="flex flex-col items-center gap-2 py-10">
-              <span class="text-2xl">🔌</span>
+              <PlugIcon class="size-8 text-muted-foreground/40" />
               <p class="text-sm text-muted-foreground">
                 暂无 MCP 服务器，添加一个开始使用（支持 stdio 本地进程与 Streamable HTTP 远程服务器）。
               </p>

@@ -60,7 +60,7 @@
             </div>
 
             <div v-if="!currentCalls.length" class="flex flex-col items-center gap-2 py-8 text-center">
-              <span class="text-2xl">🔧</span>
+              <WrenchIcon class="size-8 text-muted-foreground/40" />
               <p class="text-sm text-muted-foreground">当前会话尚未调用工具</p>
               <p class="max-w-48 text-xs text-muted-foreground/70">
                 本会话通过引擎执行 read / write / bash 等工具后，这里实时显示调用记录。
@@ -88,7 +88,7 @@
               <!-- 输入 / 输出：默认折叠 -->
               <details v-if="c.args || c.result != null" class="mt-1.5 group">
                 <summary class="flex cursor-pointer select-none items-center gap-1 rounded-md border border-border/60 bg-muted/20 px-2 py-1 text-[10px] text-muted-foreground transition hover:bg-muted/50 hover:text-foreground">
-                  <span class="transition-transform group-open:rotate-90">▶</span>
+                  <ChevronRightIcon class="size-3 transition-transform group-open:rotate-90" />
                   <span>输入 / 输出</span>
                 </summary>
                 <div class="mt-1 space-y-1.5 rounded-md border border-border/60 bg-muted/30 p-1.5">
@@ -135,7 +135,7 @@
             </div>
 
             <div v-if="!tools.length" class="flex flex-col items-center gap-2 py-10 text-center">
-              <span class="text-2xl">🔧</span>
+              <WrenchIcon class="size-8 text-muted-foreground/40" />
               <p class="text-sm text-muted-foreground">等待 MCP 工具</p>
               <p class="max-w-48 text-xs text-muted-foreground/70">
                 工具来自 Free Codex 配置的下游 MCP，可在设置页管理。
@@ -184,7 +184,7 @@
           </div>
 
           <div v-if="!diffs.length" class="flex flex-col items-center gap-2 py-10 text-center">
-            <span class="text-2xl">📝</span>
+            <FileDiffIcon class="size-8 text-muted-foreground/40" />
             <p class="text-sm text-muted-foreground">暂无 diff</p>
             <p class="max-w-48 text-xs text-muted-foreground/70">
               ChatGPT 通过引擎执行 edit / write / apply_patch 修改文件后，这里实时显示变更。
@@ -264,7 +264,7 @@
             <Badge variant="secondary" class="text-[10px]">{{ skillRows.length }}</Badge>
           </div>
           <div v-if="!skillRows.length" class="flex flex-col items-center gap-2 py-6 text-center">
-            <span class="text-xl">🧩</span>
+            <PuzzleIcon class="size-8 text-muted-foreground/40" />
             <p class="text-xs text-muted-foreground">暂无技能</p>
           </div>
           <div v-else class="rounded-lg border border-border bg-background">
@@ -401,7 +401,7 @@
           </div>
 
           <div v-if="!todos.enabled" class="flex flex-col items-center gap-2 py-8 text-center">
-            <span class="text-2xl">✅</span>
+            <ClipboardListIcon class="size-8 text-muted-foreground/40" />
             <p class="text-sm text-muted-foreground">todos 未开启</p>
             <p class="max-w-48 text-xs text-muted-foreground/70">请在 设置 → MCP 服务器 中开启 todos（系统 MCP），开启后 ChatGPT 每轮收到清单快照</p>
           </div>
@@ -414,8 +414,8 @@
                   <span class="size-1.5 rounded-full" :class="listStatusDotClass"></span>
                   {{ listStatusLabel }}
                   <span v-if="todosStale" class="flex items-center gap-1 rounded bg-red-500/10 px-1 py-px text-red-500">
-                    <span class="size-1.5 animate-pulse rounded-full bg-red-500"></span>
-                    ⚠️ 未更新 {{ todosStaleAgo }}
+                    <TriangleAlertIcon class="size-3" />
+                    未更新 {{ todosStaleAgo }}
                   </span>
                 </span>
                 <span>上次更新 {{ fmtTime(todos.list.updatedAt) }}</span>
@@ -423,7 +423,7 @@
             </div>
 
             <div v-if="!todos.list.items.length" class="flex flex-col items-center gap-2 py-6 text-center">
-              <span class="text-xl">📋</span>
+              <ListTodoIcon class="size-8 text-muted-foreground/40" />
               <p class="text-xs text-muted-foreground">清单为空，让 ChatGPT 先调用 todos_create 建立任务</p>
             </div>
             <div v-else class="flex flex-col gap-1">
@@ -461,7 +461,7 @@
           </template>
 
           <div v-else class="flex flex-col items-center gap-2 py-8 text-center">
-            <span class="text-2xl">📋</span>
+            <ListTodoIcon class="size-8 text-muted-foreground/40" />
             <p class="text-sm text-muted-foreground">尚未创建清单</p>
             <p class="max-w-48 text-xs text-muted-foreground/70">让 ChatGPT 处理多步任务时先调用 todos_create</p>
           </div>
@@ -476,7 +476,7 @@
             <Badge variant="secondary" class="text-[10px]">{{ logs.length }}</Badge>
           </div>
           <div v-if="!logs.length" class="flex flex-col items-center gap-2 py-10 text-center">
-            <span class="text-2xl">📡</span>
+            <ScrollTextIcon class="size-8 text-muted-foreground/40" />
             <p class="text-sm text-muted-foreground">暂无日志</p>
           </div>
           <div
@@ -507,7 +507,7 @@
                       : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'"
                     :aria-label="item.label"
                     :aria-current="activeTab === item.key ? 'page' : undefined"
-                    @click="activeTab = item.key"
+                    @click="onNavClick(item.key)"
                   >
                     <component :is="item.icon" class="size-4" />
                   </button>
@@ -542,13 +542,19 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   CheckIcon,
+  ChevronRightIcon,
+  CircleCheckIcon,
+  ClipboardListIcon,
   FileDiffIcon,
+  FolderTreeIcon,
   ListTodoIcon,
+  PuzzleIcon,
+  ScrollTextIcon,
   SyringeIcon,
   Trash2Icon,
   PanelRightCloseIcon,
   PanelRightOpenIcon,
-  ScrollTextIcon,
+  TriangleAlertIcon,
   Undo2Icon,
   WrenchIcon,
 } from 'lucide-vue-next'
@@ -563,8 +569,11 @@ import type { ChatCleanupSettings, ConversationEntry, FileDiffRecord, InjectionS
 const collapsed = ref(localStorage.getItem('free-codex-panel-collapsed') === '1')
 const activeTab = ref<'tools' | 'diffs' | 'injection' | 'clean' | 'todos' | 'logs'>('tools')
 
-/** 左侧垂直导航菜单（分组：工具类 / 注入类 / 日志） */
+/** 左侧垂直导航菜单（分组：文件工作区 / 工具类 / 注入类 / 日志） */
 const navGroups = [
+  [
+    { key: 'files', label: 'Files', icon: FolderTreeIcon },
+  ],
   [
     { key: 'tools', label: 'Tools', icon: WrenchIcon },
     { key: 'diffs', label: 'Diff', icon: FileDiffIcon },
@@ -578,6 +587,18 @@ const navGroups = [
     { key: 'logs', label: 'Logs', icon: ScrollTextIcon },
   ],
 ] as const
+
+/**
+ * 导航点击：Files 是纯入口（文件工作区渲染在 overlay 子窗口，不在右面板内），
+ * 点击直接通知 overlay 打开；其余为面板内标签切换。
+ */
+function onNavClick(key: (typeof navGroups)[number][number]['key']): void {
+  if (key === 'files') {
+    void window.freeCodex.openFiles()
+    return
+  }
+  activeTab.value = key as typeof activeTab.value
+}
 
 /** 当前标签标题（内容区头部） */
 const activeNavLabel = computed(() => {

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, BrowserWindowConstructorOptions, dialog, ipcMain, session, WebContentsView, type WebContents } from 'electron'
+import { app, BrowserWindow, BrowserWindowConstructorOptions, dialog, ipcMain, session, shell, WebContentsView, type WebContents } from 'electron'
 import { is } from '@electron-toolkit/utils'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -14,6 +14,8 @@ import { hasAdminPassword, setAdminPassword, generateAdminPassword } from './aut
 import { SkillManager, getSkillDirectories } from './skills'
 import { createProjectManager, type ProjectManager } from './projects'
 import { listProjectFiles } from './project-files'
+import { readProjectFile, writeProjectFile, openFileExternally } from './file-viewer'
+import { runSearch, cancelSearch } from './search'
 import { listDiffRecords, revertFile, confirmFile, undoHunk } from './file-diffs'
 import {
   startChatgptTokenCapture,
@@ -87,10 +89,14 @@ type PluginStatus = {
   appId?: string
   checkedAt: number
 }
-/** 公网状态轮询定时器（30s 一次；网关/隧道事件也会触发即时推送） */
+/** 公网状态轮询定时器（成功 10 分钟，失败加快到 15s；网关/隧道事件也会触发即时推送） */
 let tunnelStatusTimer: NodeJS.Timeout | undefined
-/** 右上角插件状态轮询定时器（60s 一次；安装/登录后也会触发即时推送） */
+/** 右上角插件状态轮询定时器（成功 10 分钟，失败加快到 20s；安装/登录后也会触发即时推送） */
 let pluginStatusTimer: NodeJS.Timeout | undefined
+/** 上次公网状态（决定下次轮询间隔） */
+let lastTunnelState: TunnelStatus['state'] | null = null
+/** 上次插件状态（决定下次轮询间隔） */
+let lastPluginState: PluginStatus['state'] | null = null
 /** 公网检测进行中（并发去重，复用 TunnelManager.ensure 的 busy 模式） */
 let tunnelStatusCheck: Promise<TunnelStatus> | null = null
 
@@ -352,6 +358,22 @@ function registerCtrlR(webContents: WebContents) {
   })
 }
 
+/** Ctrl+P：主窗口与 ChatGPT 视图内都拦截，直接打开文件工作区（避免触发页面打印） */
+function registerCtrlP(webContents: WebContents) {
+  webContents.on('before-input-event', (event, input) => {
+    if (
+      input.type === 'keyDown' &&
+      input.control &&
+      !input.shift &&
+      !input.alt &&
+      input.key.toLowerCase() === 'p'
+    ) {
+      event.preventDefault()
+      overlayWin?.webContents.send('overlay:openFiles')
+    }
+  })
+}
+
 /** F12 / Ctrl+Shift+I：打开对应视图的 DevTools（再按一次关闭）——查看注入/调试用 */
 function registerDevToolsShortcut(webContents: WebContents) {
   webContents.on('before-input-event', (event, input) => {
@@ -506,6 +528,7 @@ async function createWindow() {
     overlayWin?.destroy()
   })
   registerCtrlR(win.webContents)
+  registerCtrlP(win.webContents)
   registerDevToolsShortcut(win.webContents)
 
   chatView = new WebContentsView({
@@ -547,6 +570,7 @@ async function createWindow() {
     }
   })
   registerCtrlR(chatView.webContents)
+  registerCtrlP(chatView.webContents)
   registerDevToolsShortcut(chatView.webContents)
   win.contentView.addChildView(chatView)
   void chatView.webContents.loadURL(CHATGPT_URL)
@@ -808,11 +832,32 @@ async function withOverlayHidden<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-/** 检测并推送公网状态到渲染层（titlebar 指示器），返回最新状态 */
+/** 检测并推送公网状态到渲染层（titlebar 指示器），返回最新状态；每次推送后按新状态重排轮询 */
 async function pushTunnelStatus(): Promise<TunnelStatus> {
   const status = await checkTunnelStatus()
+  lastTunnelState = status.state
   sendToWin('tunnel:status', status)
+  scheduleTunnelPoll()
   return status
+}
+
+// ------------------------------------------------------------
+// 动态轮询：成功（online / installed）10 分钟一次；失败/未就绪状态加快，
+// 让 titlebar 指示器尽快反映状态恢复。事件/手动点击触发的推送也会重排间隔。
+// ------------------------------------------------------------
+
+const TUNNEL_POLL_OK_MS = 600_000
+const TUNNEL_POLL_FAIL_MS = 15_000
+const PLUGIN_POLL_OK_MS = 600_000
+const PLUGIN_POLL_FAIL_MS = 20_000
+
+/** 公网状态轮询调度（按上次状态选间隔；null=尚未检测按失败处理，启动先快后稳） */
+function scheduleTunnelPoll(): void {
+  if (tunnelStatusTimer) clearTimeout(tunnelStatusTimer)
+  const delay = lastTunnelState === 'online' ? TUNNEL_POLL_OK_MS : TUNNEL_POLL_FAIL_MS
+  tunnelStatusTimer = setTimeout(() => {
+    void pushTunnelStatus()
+  }, delay)
 }
 
 /** 检测右上角插件状态（freecodex 连接器已安装与否） */
@@ -836,11 +881,22 @@ async function checkPluginStatus(): Promise<PluginStatus> {
   }
 }
 
-/** 检测并推送右上角插件状态（titlebar 指示器） */
+/** 检测并推送右上角插件状态（titlebar 指示器）；每次推送后按新状态重排轮询 */
 async function pushPluginStatus(): Promise<PluginStatus> {
   const status = await checkPluginStatus()
+  lastPluginState = status.state
   sendToWin('plugin:status', status)
+  schedulePluginPoll()
   return status
+}
+
+/** 插件状态轮询调度（成功 10 分钟，失败 20s） */
+function schedulePluginPoll(): void {
+  if (pluginStatusTimer) clearTimeout(pluginStatusTimer)
+  const delay = lastPluginState === 'installed' ? PLUGIN_POLL_OK_MS : PLUGIN_POLL_FAIL_MS
+  pluginStatusTimer = setTimeout(() => {
+    void pushPluginStatus()
+  }, delay)
 }
 
 /** 把文本插入 ChatGPT 页面输入框（面板选中后调用，替换触发的 @ /） */
@@ -849,6 +905,22 @@ async function insertTextIntoActivePage(text: string): Promise<{ ok: boolean; er
   if (!wc || wc.isDestroyed()) return { ok: false, error: 'no-active-view' }
   const script = `typeof window.__freehubInsertText === 'function'
     ? window.__freehubInsertText(${JSON.stringify(text)})
+    : { ok: false, error: 'mention-script-not-injected' }`
+  const result = (await wc.executeJavaScript(script).catch((err) => {
+    console.error('[insert] 插入文本失败:', err)
+    return { ok: false, error: 'execute-failed' }
+  })) as { ok?: boolean; error?: string } | undefined
+  if (!wc.isDestroyed()) wc.focus()
+  if (result && result.ok === false) return { ok: false, error: result.error ?? 'insert-failed' }
+  return { ok: true }
+}
+
+/** 把文本插入 ChatGPT 输入框（右键菜单等无触发字符场景；找不到输入框时自动定位 composer） */
+async function insertToChatComposer(text: string): Promise<{ ok: boolean; error?: string }> {
+  const wc = chatView?.webContents
+  if (!wc || wc.isDestroyed()) return { ok: false, error: 'no-active-view' }
+  const script = `typeof window.__freehubInsertToComposer === 'function'
+    ? window.__freehubInsertToComposer(${JSON.stringify(text)})
     : { ok: false, error: 'mention-script-not-injected' }`
   const result = (await wc.executeJavaScript(script).catch((err) => {
     console.error('[insert] 插入文本失败:', err)
@@ -994,14 +1066,10 @@ app.whenReady().then(async () => {
   // cloudflared 作为 app 层能力：独立于网关生命周期常驻，公网不可达时才拉起（见 tunnel-manager.ts）。
   // 配置公网就绪才创建；之后向导/保存配置也会重新同步（syncTunnelManager），无需重启应用。
   await syncTunnelManager()
-  // 公网连通状态轮询（titlebar 指示器；10 分钟一次，点击图标/网关事件即时推送）
-  tunnelStatusTimer = setInterval(() => {
-    void pushTunnelStatus()
-  }, 600_000)
-  // 右上角插件状态独立轮询（10 分钟一次；ChatGPT 页面加载完/点击图标/安装登录后即时推送）
-  pluginStatusTimer = setInterval(() => {
-    void pushPluginStatus()
-  }, 600_000)
+  // 公网连通状态轮询（titlebar 指示器；成功 10 分钟，失败 15s，点击图标/网关事件即时推送）
+  scheduleTunnelPoll()
+  // 右上角插件状态独立轮询（成功 10 分钟，失败 20s；页面加载完/点击图标/安装登录后即时推送）
+  schedulePluginPoll()
   skills = new SkillManager(() => config.projectRoot || null)
   gateway.onEvent((event) => sendToWin('mcp:event', event))
   // 工具调用（发起/完成）→ 记录会话归属 + 推送渲染层实时更新
@@ -1417,6 +1485,11 @@ app.whenReady().then(async () => {
     if (typeof name !== 'string' || !name) return { ok: false, error: 'invalid-skill-name' }
     return insertTextIntoActivePage(`/skill:${name} `)
   })
+  /** 右键菜单：把文件引用 / 选中片段插入 ChatGPT 输入框（无触发字符场景） */
+  ipcMain.handle('freecodex:insertToChat', (_e, text: string) => {
+    if (typeof text !== 'string' || !text) return { ok: false, error: 'invalid-text' }
+    return insertToChatComposer(text)
+  })
 
   // ---------- Diff（引擎工具调用产生的文件变更）----------
   /** 剥离内部字段（before/absPath）后再发给渲染层 */
@@ -1510,6 +1583,19 @@ app.whenReady().then(async () => {
 
   // ---------- 项目（Project）----------
   ipcMain.handle('project:get', () => projects.getState())
+  /** 在系统文件管理器中打开当前激活项目的目录（定位项目位置） */
+  ipcMain.handle('project:openInSystem', async () => {
+    const active = projects.getState().active
+    if (!active) {
+      return { ok: false, error: 'no active project' }
+    }
+    try {
+      const errorMessage = await shell.openPath(active)
+      return errorMessage ? { ok: false, error: errorMessage } : { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
   ipcMain.handle('project:openFolder', async () => {
     // 原生对话框会被 alwaysOnTop overlay 挡住 → 弹窗前隐藏
     const result = await withOverlayHidden(() => projects.openFolder())
@@ -1588,6 +1674,27 @@ app.whenReady().then(async () => {
     overlayWin?.webContents.send('overlay:toast', input)
   })
 
+  // ---------- 文件预览 / 编辑（overlay File Explorer）----------
+  /** 当前激活项目的根目录（无激活项目时回退配置里的 projectRoot） */
+  const activeProjectRoot = (): string => projects.getState().active ?? config.projectRoot ?? ''
+  ipcMain.handle('file:read', (_e, relPath: string) => readProjectFile(activeProjectRoot(), relPath))
+  ipcMain.handle('file:write', (_e, input: { relPath: string; content: string; eol?: string; expectMtimeMs?: number }) =>
+    writeProjectFile(activeProjectRoot(), input),
+  )
+  ipcMain.handle('file:openExternally', (_e, relPath: string) => openFileExternally(activeProjectRoot(), relPath))
+  /** 主窗口请求在 overlay 打开文件工作区 */
+  ipcMain.handle('overlay:openFiles', () => {
+    overlayWin?.webContents.send('overlay:openFiles')
+  })
+
+  // ---------- 全文搜索（ripgrep，File Explorer 内嵌）----------
+  ipcMain.handle('search:run', (_e, input: { pattern: string; options?: { caseSensitive?: boolean; regex?: boolean; wholeWord?: boolean; include?: string[]; exclude?: string[] } }) =>
+    runSearch(activeProjectRoot(), input?.pattern ?? '', input?.options ?? {}),
+  )
+  ipcMain.handle('search:cancel', () => {
+    cancelSearch()
+  })
+
   // ---------- 主题 ----------
   ipcMain.handle('freecodex:setTheme', async (_e, dark: boolean) => {
     currentThemeDark = dark === true
@@ -1629,11 +1736,11 @@ async function shutdownBackground(): Promise<void> {
   shuttingDown = true
   console.log('[quit] 正在停止后台服务…')
   if (tunnelStatusTimer) {
-    clearInterval(tunnelStatusTimer)
+    clearTimeout(tunnelStatusTimer)
     tunnelStatusTimer = undefined
   }
   if (pluginStatusTimer) {
-    clearInterval(pluginStatusTimer)
+    clearTimeout(pluginStatusTimer)
     pluginStatusTimer = undefined
   }
   if (convPollTimer) {
